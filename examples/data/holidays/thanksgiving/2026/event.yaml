@@ -1,0 +1,44 @@
+title: Thanksgiving 2026
+date: Thursday, November 26
+
+# Up front: what guests need to plan their day
+planning:
+  arrival: Arrive any time from 2:00 PM.
+  dinner: Dinner at 4:00 PM.
+  address: 123 Example St, Springfield
+  parking: Street parking; driveway is for unloading only
+  recipes: For any dish the host asks you to bring, she's happy to send her recipe, or you can use your own.
+
+# Shopping time
+shopping:
+  order: Host orders groceries the weekend before.
+
+# Day of
+day_of:
+  timeline: See schedule.md.
+
+# owner: a name from family.yaml or the host; empty = needs an owner
+# status: Proposed (not asked yet) · Requested (asked) · Confirmed
+# plan = up front (serves, dietary, recipe, notes) · shopping = what to buy · prep_ahead = before the day · day_of = the day itself
+menu:
+  - dish: Roast Turkey
+    course: Main
+    owner: Alex
+    status: Confirmed
+  - dish: Green Bean Casserole
+    course: Side
+    owner: Aunt Sue
+    status: Proposed
+    plan:
+      serves: 12
+      recipe: recipes/green-bean-casserole.md
+    prep_ahead: Assemble the night before; keep the onions separate.
+    day_of: Bring it ready to bake; 30 min at 350°.
+  - dish: Pumpkin Pie (2)
+    course: Dessert
+    owner: Uncle Bob
+    status: Proposed
+  - dish: Pecan Pie
+    course: Dessert
+    owner:
+    status: Proposed

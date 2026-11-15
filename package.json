@@ -1,0 +1,29 @@
+{
+  "name": "holiday_coordinator",
+  "version": "1.0.0",
+  "description": "",
+  "directories": {
+    "example": "examples",
+    "test": "test"
+  },
+  "scripts": {
+    "hc": "node src/cli.ts",
+    "test": "node --test test/*.test.ts",
+    "bot:install": "scripts/bot-service.sh install",
+    "bot:uninstall": "scripts/bot-service.sh uninstall",
+    "bot:restart": "scripts/bot-service.sh restart",
+    "bot:status": "scripts/bot-service.sh status",
+    "bot:logs": "scripts/bot-service.sh logs"
+  },
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.8.0",
+    "baileys": "^7.0.0-rc14",
+    "pino": "^10.4.0",
+    "yaml": "^2.9.1"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=24"
+  }
+}

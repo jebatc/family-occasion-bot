@@ -1,0 +1,11 @@
+# Copy to private/family.yaml. Phones: digits with country code (10-digit numbers are treated as US).
+# household (optional): people sharing one are RSVP'd and counted together; the host's household is always coming.
+host:
+  name: Alex
+  phone: "15550000000"
+people:
+  - name: Aunt Sue
+    phone: "15550000001"
+    dietary: vegetarian
+  - name: Uncle Bob
+    phone: "15550000002"
