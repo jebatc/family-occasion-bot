@@ -178,3 +178,7 @@ The tests use stand-ins for Claude and WhatsApp, so they're free and work offlin
 - **One coordinator:** it's built around a single host texting commands.
 - **Uptime:** replies only happen while the computer running it is on. Missed messages are caught up within 3 days.
 - **Judgment:** the screening model can occasionally misjudge a message. Held messages come to you, and you can answer with `tell`.
+
+## License
+
+[MIT](LICENSE)
