@@ -16,14 +16,31 @@ export function openDb(path: string): Db {
   `);
   // Databases created before dish proposals lack the column
   if (!db.prepare("SELECT 1 FROM pragma_table_info('escalations') WHERE name = 'dish'").get()) db.exec("ALTER TABLE escalations ADD COLUMN dish TEXT");
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'hash'").get()) db.exec("ALTER TABLE messages ADD COLUMN hash TEXT");
+  // incoming texts are never kept; this clears any an older version stored
+  db.exec("UPDATE messages SET body = '' WHERE direction = 'in' AND body != ''");
   return db;
 }
 
-/** Returns false when this WhatsApp message id was already logged (WhatsApp can redeliver). */
-export function logMessage(db: Db, phone: string, direction: "in" | "out", body: string, waId?: string) {
+/** Clears stored words the bot no longer needs: texts to the host, and answered questions. */
+export function scrubStoredText(db: Db, hostPhone: string) {
+  db.prepare("UPDATE messages SET body = '' WHERE phone IN (?, 'group') AND body != ''").run(hostPhone);
+  db.exec("UPDATE escalations SET question = '', suggested = NULL, answer = NULL WHERE status = 'done' AND question != ''");
+}
+
+/** Clears every stored word of every message and question; RSVPs and the plan are kept. */
+export function forgetAllText(db: Db) {
+  db.exec("UPDATE messages SET body = ''; UPDATE escalations SET question = '', suggested = NULL, answer = NULL; UPDATE changes SET detail = '' WHERE action = 'held_message'");
+}
+
+/**
+ * Records that a message happened. Returns false when this message id was already logged (redeliveries).
+ * body is stored as given, so callers pass "" for anything whose words shouldn't be kept.
+ */
+export function logMessage(db: Db, phone: string, direction: "in" | "out", body: string, waId?: string, hash?: string) {
   const r = db
-    .prepare("INSERT OR IGNORE INTO messages (wa_id, phone, direction, body, ts) VALUES (?, ?, ?, ?, ?)")
-    .run(waId ?? null, phone, direction, body, Date.now());
+    .prepare("INSERT OR IGNORE INTO messages (wa_id, phone, direction, body, ts, hash) VALUES (?, ?, ?, ?, ?, ?)")
+    .run(waId ?? null, phone, direction, body, Date.now(), hash ?? null);
   return r.changes > 0;
 }
 

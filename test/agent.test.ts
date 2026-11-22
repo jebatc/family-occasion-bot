@@ -4,10 +4,10 @@ import { cpSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, saveDish, titleCase, type Config } from "../src/config.ts";
-import { openDb, type Db } from "../src/db.ts";
+import { openDb, logMessage, scrubStoredText, forgetAllText, type Db } from "../src/db.ts";
 import { handleInbound, statusText, dietaryConflicts, ovensText, reminderMessages, type Ctx } from "../src/agent.ts";
 import { toInbound, worthCatchingUp } from "../src/whatsapp.ts";
-import { useTransport } from "../src/transport.ts";
+import { useTransport, dryRunSent, textHash } from "../src/transport.ts";
 import { LIMITS, leaksPhone } from "../src/guard.ts";
 
 process.env.DRY_RUN = "1";
@@ -20,6 +20,7 @@ let config: Config;
 // The bot writes to event.yaml, so every test gets its own copy of the example data
 const reload = () => (config = loadConfig(dir, "thanksgiving", "2026"));
 beforeEach(() => {
+  dryRunSent.length = 0;
   db = openDb(":memory:");
   dir = mkdtempSync(join(tmpdir(), "hc-test-"));
   cpSync("examples/data", dir, { recursive: true });
@@ -42,8 +43,8 @@ function fakeClient(responses: any[], verdict = "relevant") {
 const toolUse = (id: string, name: string, input: object) => ({ type: "tool_use", id, name, input });
 const turn = (...content: any[]) => ({ stop_reason: "tool_use", content });
 const done = { stop_reason: "end_turn", content: [{ type: "text", text: "" }] };
-const outbound = (phone: string) =>
-  db.prepare("SELECT body FROM messages WHERE phone = ? AND direction = 'out' ORDER BY id").all(phone).map((r) => r.body);
+// what was sent, from the in-memory dry-run log (the database doesn't keep most texts' words)
+const outbound = (phone: string) => dryRunSent.filter((m) => m.to === phone).map((m) => m.text);
 
 test("guest RSVP is recorded and answered", async () => {
   const { client, requests } = fakeClient([
@@ -64,7 +65,7 @@ test("guest RSVP is recorded and answered", async () => {
   assert.match(statusText(config, db), /3 coming/, "Sue's 2 plus the host");
 });
 
-test("escalation goes to host, host approval reaches the guest and is remembered", async () => {
+test("escalation goes to host, host approval reaches the guest, then the question is forgotten", async () => {
   const { client } = fakeClient([
     turn(toolUse("a", "escalate", { question: "Can I bring my new boyfriend?", suggested_reply: "Of course!" }),
          toolUse("b", "reply", { text: "Let me check with Alex!" })),
@@ -81,7 +82,10 @@ test("escalation goes to host, host approval reaches the guest and is remembered
 
   const next = fakeClient([done]);
   await handleInbound({ ...ctx, client: next.client }, { waId: "w3", from: SUE, text: "thanks!" });
-  assert.match(next.requests[0].system, /Q: Can I bring my new boyfriend\?\nA: Of course!/);
+  assert.doesNotMatch(next.requests[0].system, /boyfriend/);
+  assert.deepEqual({ ...db.prepare("SELECT question, suggested, answer FROM escalations WHERE id = 1").get() }, { question: "", suggested: null, answer: null });
+  assert.doesNotMatch(next.requests[0].messages[0].content, /bf\?/, "Sue's earlier text isn't kept");
+  assert.match(next.requests[0].messages[0].content, /You: Of course!\n\nTheir new message, the one to answer:\nAunt Sue: thanks!/, "Tom's own replies give the context");
 });
 
 test("host can answer in their own words", async () => {
@@ -678,6 +682,7 @@ const byHost = (phone: string) =>
 
 test("texting as you: strangers and everyday texts get no reply", () =>
   asHost(async () => {
+    tomTexted(SUE);
     await handleInbound({ config, db, client: null as any }, { waId: "w1", from: "19998887777", text: "your package is delayed" });
     assert.equal(outbound(HOST).length, 0, "no 'unknown number' alerts for the host's own texts");
     const { client, requests } = fakeClient([], "off_topic");
@@ -686,30 +691,58 @@ test("texting as you: strangers and everyday texts get no reply", () =>
     assert.equal(requests.length, 0);
   }));
 
-test("texting as you: what you type is kept, the bot's echoes aren't", () =>
+// Tom texted them earlier, so on the host's own number he's listening for their answer
+const tomTexted = (phone: string, text = "Will you be joining? — Tom 🦃") => logMessage(db, phone, "out", text, undefined, textHash(text));
+
+test("texting as you: only people Tom is talking with are read at all", () =>
   asHost(async () => {
-    const { client } = fakeClient([turn(toolUse("a", "reply", { text: "It's at 2! — Tom 🦃" })), done]);
-    await handleInbound({ config, db, client }, { waId: "w1", from: SUE, text: "what time?" });
-    await handleInbound({ config, db, client }, { waId: "w2", from: SUE, text: "It's at 2! — Tom 🦃", mine: true });
-    assert.deepEqual(byHost(SUE), [], "the bot's own text came back and was skipped");
-    await handleInbound({ config, db, client }, { waId: "w3", from: SUE, text: "Can't wait to see you!", mine: true });
-    assert.deepEqual(byHost(SUE), ["Can't wait to see you!"]);
+    const { client, requests, screens } = fakeClient([done]);
+    await handleInbound({ config, db, client }, { waId: "w1", from: SUE, text: "Call me when you get a chance" });
+    assert.equal(screens.length + requests.length, 0, "never sent to the screening model or the agent");
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM messages").get()?.n, 0, "nothing recorded");
+    tomTexted(SUE);
+    await handleInbound({ config, db, client }, { waId: "w2", from: SUE, text: "Yes we'll come" });
+    assert.equal(screens.length, 1);
+  }));
+
+test("texting as you: your own texts reach Tom only as a time, and his echoes are skipped", () =>
+  asHost(async () => {
+    tomTexted(SUE, "It's at 2! — Tom 🦃");
+    await handleInbound({ config, db, client: null as any }, { waId: "w1", from: SUE, text: "", mine: true, hash: textHash("It's at 2! — Tom 🦃") });
+    assert.equal(byHost(SUE).length, 0, "the bot's own text came back and was skipped");
+    await handleInbound({ config, db, client: null as any }, { waId: "w2", from: SUE, text: "", mine: true, hash: textHash("Can't wait to see you!") });
+    assert.deepEqual(byHost(SUE), [""], "noted that you texted, with no words");
   }));
 
 test("texting as you: while you're talking with someone, the bot records but stays quiet", () =>
   asHost(async () => {
-    await handleInbound({ config, db, client: null as any }, { waId: "w1", from: SUE, text: "Are you guys hosting this year?", mine: true });
+    tomTexted(SUE);
+    await handleInbound({ config, db, client: null as any }, { waId: "w1", from: SUE, text: "", mine: true, hash: textHash("Are you guys hosting?") });
     const { client, requests } = fakeClient([
       turn(toolUse("a", "record_rsvp", { status: "yes" }), toolUse("b", "reply", { text: "Yay! — Tom 🦃" })),
       done,
     ]);
     await handleInbound({ config, db, client }, { waId: "w2", from: SUE, text: "Yes! We'll be there" });
-    assert.equal(outbound(SUE).filter((b) => b.includes("Tom")).length, 0, "no reply from Tom mid-conversation");
+    assert.equal(outbound(SUE).length, 0, "no reply from Tom mid-conversation");
     assert.match(JSON.stringify(requests[1].messages.at(-1).content), /not sent/);
-    assert.match(requests[0].messages[0].content, /Alex \(personally\): Are you guys hosting/);
     assert.match(outbound(HOST).at(-1)!, /Aunt Sue said yes while you were texting them/);
     assert.equal(db.prepare("SELECT status FROM rsvps WHERE phone = ?").get(SUE)?.status, "yes");
   }));
+
+test("no incoming text, and no text sent to the host, is stored", async () => {
+  const { client } = fakeClient([
+    turn(toolUse("a", "escalate", { question: "Can Dana come?", suggested_reply: "Sure!" }), toolUse("b", "reply", { text: "Let me check! — Tom 🦃" })),
+    done,
+  ]);
+  await handleInbound({ config, db, client }, { waId: "w1", from: SUE, text: "can my friend Dana come?" });
+  await handleInbound({ config, db, client: null as any }, { waId: "w2", from: HOST, text: "status" });
+  const kept = db.prepare("SELECT phone, direction, body FROM messages WHERE body != ''").all().map((r) => ({ ...r }));
+  assert.deepEqual(kept, [{ phone: SUE, direction: "out", body: "Let me check! — Tom 🦃" }], "only Tom's own text to Sue");
+  scrubStoredText(db, HOST);
+  forgetAllText(db);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE body != ''").get()?.n, 0);
+  assert.equal(db.prepare("SELECT question FROM escalations").get()?.question, "");
+});
 
 test("texting as you: the bot's replies in your self-chat aren't run as commands", () =>
   asHost(async () => {

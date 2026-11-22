@@ -1,10 +1,15 @@
+import { createHash } from "node:crypto";
 import { type Db, logMessage } from "./db.ts";
 
 /**
  * One text. waId is the transport's own message id, used to skip redeliveries.
- * mine: the host typed this to `from` themselves (only when the bot texts from the host's own number).
+ * mine: the host texted `from` personally (only when the bot texts from the host's own number). Its words never
+ * reach the bot: text is empty, and hash only lets the bot tell its own sent texts from the host's.
  */
-export type Inbound = { waId: string; from: string; text: string; ts?: number; mine?: boolean };
+export type Inbound = { waId: string; from: string; text: string; ts?: number; mine?: boolean; hash?: string };
+
+/** A fingerprint of a text, so the bot can recognize its own messages without keeping their words. */
+export const textHash = (text: string) => createHash("sha256").update(text.trim()).digest("hex").slice(0, 32);
 
 /** How the bot reaches people: WhatsApp (Baileys) or the Mac's Messages app (iMessage + SMS). */
 export interface Transport {
@@ -26,15 +31,25 @@ export const useTransport = (t: Transport | undefined) => void (active = t);
 export const transportName = () => active?.name;
 export const sharesHostNumber = () => !!active?.sharesHostNumber;
 
+/** DRY_RUN: what would have been sent, in memory only, for simulate and the tests. */
+export const dryRunSent: { to: string; text: string }[] = [];
+
 async function deliver(to: string, text: string, how: (t: Transport) => Promise<void>) {
-  if (process.env.DRY_RUN) return console.log(`[dry-run] → ${to}: ${text}`);
+  if (process.env.DRY_RUN) {
+    dryRunSent.push({ to, text });
+    return console.log(`[dry-run] → ${to}: ${text}`);
+  }
   if (!active) throw new Error("No messaging transport is running");
   await how(active);
 }
 
-export async function sendText(db: Db, to: string, body: string) {
+/**
+ * keepText: store the words of this message. Only the bot's own texts to guests are kept (so it knows what it
+ * asked them); messages to the host often quote guests, so only their fingerprint is stored.
+ */
+export async function sendText(db: Db, to: string, body: string, keepText = true) {
   await deliver(to, body, (t) => t.send(to, body));
-  logMessage(db, to, "out", body);
+  logMessage(db, to, "out", keepText ? body : "", undefined, textHash(body));
 }
 
 /** True when announce can post to a group chat; otherwise it texts each person. */

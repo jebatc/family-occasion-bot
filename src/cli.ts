@@ -2,8 +2,8 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import { DATA_DIR, loadConfig, phoneKey } from "./config.ts";
-import { openDb, lastMessageTs } from "./db.ts";
-import { handleInbound, ovensText, sendReminders, statusText } from "./agent.ts";
+import { openDb, lastMessageTs, scrubStoredText, forgetAllText } from "./db.ts";
+import { handleInbound, ovensText, sendReminders, statusText, eventDay, FORGET_AFTER_EVENT_MS } from "./agent.ts";
 import { useTransport } from "./transport.ts";
 import { whatsapp } from "./whatsapp.ts";
 import { imessage, checkMessages } from "./imessage.ts";
@@ -39,6 +39,11 @@ switch (cmd) {
     break;
   }
 
+  case "forget":
+    forgetAllText(db);
+    console.log("Cleared the words of every stored message and question. RSVPs, dishes and the plan are kept.");
+    break;
+
   case "check":
     console.log(await checkMessages());
     break;
@@ -56,6 +61,12 @@ switch (cmd) {
       : imessage(asMe ? { host: config.host.phone, selfHandles } : {});
     if (asMe && kind !== "whatsapp") console.log(`Texting as you. Send commands by texting yourself (+${config.host.phone}).`);
     useTransport(transport);
+    scrubStoredText(db, config.host.phone); // anything an older version kept
+    const forgetIfOver = () => {
+      const day = eventDay(ctx.config);
+      if (day && Date.now() > +day + FORGET_AFTER_EVENT_MS) forgetAllText(db);
+    };
+    forgetIfOver();
     const ctx = { config, db, client: claude() };
     let queue = Promise.resolve(); // one message at a time keeps per-guest history consistent
     await transport.start((msg) => {
@@ -73,7 +84,7 @@ switch (cmd) {
     // daily nudges for missing RSVPs and unconfirmed dishes; checked every 30 minutes, queued with incoming messages
     setInterval(() => {
       queue = queue
-        .then(() => { try { ctx.config = loadConfig(); } catch {} return sendReminders(ctx); })
+        .then(() => { try { ctx.config = loadConfig(); } catch {} scrubStoredText(db, config.host.phone); forgetIfOver(); return sendReminders(ctx); })
         .catch((err) => console.error("reminders failed", err));
     }, 30 * 60_000);
     break;
@@ -83,6 +94,7 @@ switch (cmd) {
     console.log(`Usage: npm run hc -- <command>
   serve                       start answering texts (TRANSPORT=messages, the default, or whatsapp)
   check                       check the Mac can read and send Messages
+  forget                      clear the words of all stored messages (RSVPs and the plan are kept)
   status                      who's coming, who's bringing what, open questions
   ovens                       which dishes go in which oven, in time order
   simulate <name|host> "msg"  run a message through the agent without sending (DRY_RUN)

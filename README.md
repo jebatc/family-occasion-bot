@@ -111,6 +111,15 @@ Family members can't make the bot run code or change things they shouldn't:
 - **No phone numbers out.** A reply containing a phone number is blocked and shown to you instead.
 - **You stay informed.** You're told when someone changes a yes, declines a dish, or offers something that doesn't fit a family member's dietary needs. Every change is logged.
 
+## Privacy
+
+The assistant uses a text's words only while it handles that text, then lets them go:
+
+- **Incoming texts are never stored.** The database records that a text arrived and when, plus whatever it led to: an RSVP, a dish confirmed, an oven temperature, a question for you. A question's wording is cleared as soon as you answer it.
+- **What's kept is the assistant's own texts to guests,** so it knows what it asked them. Texts to you (which often quote guests) are stored only as a fingerprint, so it can recognize its own messages. Two days after the event, every stored word is cleared automatically. Run `npm run hc -- forget` to clear them at any time.
+- **Claude.** Each text the assistant handles is sent to Anthropic's API to be screened and answered. Anthropic doesn't train models on API data without your permission, and deletes API inputs and outputs within 30 days. Zero data retention (nothing stored once the response returns) is available from Anthropic on request, and covers the models this uses.
+- **Not controlled by the assistant:** your Mac's Messages history and iCloud keep every text as they always do, and your family's phones keep their side of the conversation.
+
 ## Getting started
 
 You'll need:
@@ -151,10 +160,10 @@ By default (`TEXT_AS=me`) the assistant texts **from your own number**, through 
 2. **Give permissions.** In System Settings → Privacy & Security → Full Disk Access, add Terminal and node. To find node's real file, run `realpath $(which node)` and press ⌘⇧G in the file picker to paste the path. The first `npm run hc -- check` also asks to let Terminal control Messages; allow it.
 3. **Send commands by texting yourself.** In Messages on your phone, start a chat with your own number and type `status`. Everything you used to text the bot (`rsvp`, `#4 ok`, `tell Robin: …`) goes in that chat, and the assistant answers there. If your texts to yourself go to your Apple ID email, put that email in `HOST_APPLE_ID`.
 
-Because it's your own number, the assistant is careful about what it answers:
-- **Only the occasion.** A screening model decides whether each text is about the gathering. Anything else ("did you see the game?") gets no reply, and when it's unsure, it stays out. People not in `family.yaml` are ignored entirely.
-- **It steps back when you're talking.** If you've texted someone yourself in the last 30 minutes, the assistant doesn't reply to them. It still records an RSVP or dish answer from what they say, and tells you if they said yes.
-- **It knows what you said.** Texts you send people yourself become part of the conversation it reads, so it doesn't repeat or contradict you.
+Because it's your own number, the assistant keeps out of your personal texts:
+- **It only reads threads it started.** A text is looked at only if it's from someone in `family.yaml` whom the assistant has texted in the last 2 days. Everything else is never read, never sent to Claude and never recorded. Daily nudges keep the thread open with anyone it's still waiting on.
+- **Your own texts stay yours.** The assistant never sees the words of what you text people. It only learns that you texted someone, and when, so it can step back: if you've texted someone in the last 30 minutes, it doesn't reply to them. It still records an RSVP or dish answer from what they say, and tells you if they said yes.
+- **Only the occasion.** Within those threads, a screening model decides whether each text is about the gathering. Anything else gets no reply, and when it's unsure, it stays out.
 
 **Carrier limits.** iMessages go through Apple, not your carrier. SMS go out from your iPhone like ordinary texts. Carriers watch for spam-like volume, typically hundreds of near-identical texts quickly, and a family's invitations are far below that. The assistant also spaces out bulk sends by a few seconds. Expect a burst of a dozen or two texts when you send `rsvp`, then a trickle.
 

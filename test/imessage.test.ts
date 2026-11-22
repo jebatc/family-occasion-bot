@@ -144,6 +144,8 @@ test("texting as you: the bot's own texts aren't mistaken for yours", () => {
   assert.equal(accept(msg("15550000001", "Gobble gobble! — Tom 🦃", { mine: true })), undefined);
   assert.equal(accept(msg(HOST, "Sent to Aunt Sue.", { mine: true })), undefined);
   assert.equal(accept(msg(HOST, "Sent to Aunt Sue.")), undefined);
-  assert.equal(accept(msg("15550000001", "See you Thursday!", { mine: true }))?.mine, true, "what you typed yourself");
+  const yours = accept(msg("15550000001", "See you Thursday!", { mine: true }));
+  assert.deepEqual([yours?.mine, yours?.text], [true, ""], "what you typed yourself arrives with no words");
+  assert.equal(yours?.hash?.length, 32);
   assert.equal(accept(msg("15550000001", "Can't wait"))?.text, "Can't wait");
 });

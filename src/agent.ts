@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { type Config, type Dish, type Person, phoneKey, saveDish, removeDish, findDish, titleCase } from "./config.ts";
 import { type Db, logMessage, logChange } from "./db.ts";
 import { LIMITS, WRITE_TOOLS, clip, leaksPhone, recentMessages, screenMessage } from "./guard.ts";
-import { type Inbound, sendText, postToGroup, hasGroup, pause, sharesHostNumber } from "./transport.ts";
+import { type Inbound, sendText, postToGroup, hasGroup, pause, sharesHostNumber, textHash } from "./transport.ts";
 
 const MODEL = "claude-opus-5-5";
 /** quiet: the host is texting this guest personally, so the agent records things but sends nothing to them. */
@@ -12,6 +12,10 @@ export type Ctx = { config: Config; db: Db; client: Anthropic; quiet?: boolean }
 
 /** When the bot texts from the host's own number: how long after the host texts someone personally the bot stays out of it. */
 export const HANDOFF_MS = 30 * 60_000;
+/** When the bot texts from the host's own number, it only reads texts from people it has texted within this window. */
+export const OPEN_THREAD_MS = 2 * 24 * 3600_000;
+// texts to the host quote guests, so their words are never stored (see sendText)
+const tellHost = (db: Db, phone: string, text: string) => sendText(db, phone, text, false);
 // messages the host typed personally are logged as outgoing with the transport's message id; the bot's own have none
 const BY_HOST = "(direction = 'out' AND wa_id IS NOT NULL)";
 
@@ -112,16 +116,15 @@ const tools: Anthropic.Beta.BetaTool[] = [
   },
 ];
 
-function systemPrompt({ config, db }: Ctx) {
+function systemPrompt({ config }: Ctx) {
   const { persona, host, event } = config;
-  const answered = db.prepare("SELECT question, answer FROM escalations WHERE status = 'done'").all();
   return `You are ${persona.name}, ${host.name}'s assistant for ${event.title}. Tone: ${persona.tone}. Sign off as: ${persona.signoff}
 
 You're chatting 1:1 by text with a family member. Keep replies short, like a text message.${sharesHostNumber() ? `
-You're texting from ${host.name}'s own phone number, so this person also texts ${host.name} about everything else in life. Only handle the gathering. If the newest message isn't about the gathering or your conversation with them, don't reply at all. Lines marked "${host.name} (personally)" were typed by ${host.name}; don't contradict or repeat them.` : ""}
+You're texting from ${host.name}'s own phone number, so this person also texts ${host.name} about everything else in life. Only handle the gathering. If the newest message isn't about the gathering or your conversation with them, don't reply at all.` : ""}
 
 Rules:
-- Answer only from the event details, plan, schedule and host answers below. If the answer isn't there or you're unsure, call escalate and tell the guest you're checking with ${host.name}.
+- Answer only from the event details, plan and schedule below. If the answer isn't there or you're unsure, call escalate and tell the guest you're checking with ${host.name}.
 - A yes RSVP means their whole household is coming; don't ask how many. If they want to bring anyone beyond their household (a friend, a date, extra guests), escalate it to ${host.name}.
 - Escalate anything that would change the plan: guests beyond their own household, swapping or dropping dishes, dietary conflicts, money, logistics, or anything sensitive.
 - Recording the guest's own RSVP, or their yes/no on a dish they were asked to bring, needs no escalation.
@@ -141,10 +144,7 @@ ${config.plan || "(none yet)"}
 </plan>
 <schedule>
 ${config.schedule || "(none yet)"}
-</schedule>
-<host_answers>
-${answered.map((r) => `Q: ${r.question}\nA: ${r.answer}`).join("\n\n") || "(none yet)"}
-</host_answers>`;
+</schedule>`;
 }
 
 // shortcut: "Sam" matches "Sam Rivera"; use full names in event.yaml if two people share a first name
@@ -164,7 +164,7 @@ async function settleRsvpTasks({ config, db }: Ctx, guest: Person, rsvp: string)
     const when = new Date().toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
     for (const d of tasks) saveDish(config.eventFile, d.dish, { status: "confirmed", confirmation: `${when}: confirmed by RSVP` });
   } else if (rsvp === "no") {
-    await sendText(db, config.host.phone, `${guest.household} isn't coming, so these need someone else: ${tasks.map((d) => d.dish).join(", ")}.`);
+    await tellHost(db, config.host.phone, `${guest.household} isn't coming, so these need someone else: ${tasks.map((d) => d.dish).join(", ")}.`);
   }
 }
 
@@ -209,12 +209,13 @@ function householdRsvp(db: Db, members: Person[]) {
     .get(...members.map((m) => m.phone));
 }
 
-function guestContext({ config, db }: Ctx, guest: Person) {
+/** Guests' texts are never stored, so the conversation is the bot's own recent texts plus the new message. */
+function guestContext({ config, db }: Ctx, guest: Person, text: string) {
   const mine = config.menu.filter((d) => owns(d, guest));
   const members = households(config).get(guest.household)!;
   const rsvp = householdRsvp(db, members);
   const history = db
-    .prepare(`SELECT direction, body, ${BY_HOST} AS by_host FROM messages WHERE phone = ? ORDER BY id DESC LIMIT 20`)
+    .prepare("SELECT body FROM messages WHERE phone = ? AND direction = 'out' AND wa_id IS NULL AND body != '' ORDER BY id DESC LIMIT 10")
     .all(guest.phone)
     .reverse();
   return `Guest: ${guest.name}
@@ -223,8 +224,11 @@ Dietary: ${guest.dietary ?? "none noted"}
 Your dishes and day-of tasks: ${mine.map((d) => `${detailed(d)} (${d.course === "task" ? "task, " : ""}${d.status ?? "proposed"}${d.fallback ? `; falls back to ${d.fallback} if they can't` : ""})`).join("; ") || "none"}
 Household RSVP: ${guest.household === config.host.household ? `hosting (lives with ${config.host.name}; don't ask them to RSVP)` : rsvp ? JSON.stringify(rsvp) : "not yet"}
 
-Conversation (oldest first; the last message is the one to answer):
-${history.map((m) => `${m.direction === "in" ? guest.name : m.by_host ? `${config.host.name} (personally)` : "You"}: ${m.body}`).join("\n")}`;
+Your recent texts to them (oldest first; their replies aren't kept):
+${history.map((m) => `You: ${m.body}`).join("\n") || "(none)"}
+
+Their new message, the one to answer:
+${guest.name}: ${text}`;
 }
 
 async function escalate(ctx: Ctx, guest: Person, question: string, suggested?: string, dish?: string) {
@@ -235,7 +239,7 @@ async function escalate(ctx: Ctx, guest: Person, question: string, suggested?: s
   const how = dish
     ? `Reply "#${id} ok" to add it and send: ${suggested}\nOr "#${id} no" to decline (add a message after "no" if you like).`
     : suggested ? `Suggested reply: ${suggested}\nReply "#${id} ok" to send it, or "#${id} <your answer>".` : `Reply "#${id} <your answer>".`;
-  await sendText(ctx.db, host.phone, `#${id} ${guest.name} ${dish ? question : `asks: ${question}`}\n${how}`);
+  await tellHost(ctx.db, host.phone, `#${id} ${guest.name} ${dish ? question : `asks: ${question}`}\n${how}`);
 }
 
 async function runTool(ctx: Ctx, guest: Person, name: string, input: any) {
@@ -243,7 +247,7 @@ async function runTool(ctx: Ctx, guest: Person, name: string, input: any) {
     case "reply": {
       const text = clip(input.text, LIMITS.reply);
       if (leaksPhone(text, ctx.config)) {
-        await sendText(ctx.db, ctx.config.host.phone, `⚠️ Held a reply to ${guest.name} because it contained a phone number:\n${text}`);
+        await tellHost(ctx.db, ctx.config.host.phone, `⚠️ Held a reply to ${guest.name} because it contained a phone number:\n${text}`);
         return "error: reply blocked because it contained a phone number. Never share phone numbers; send a reply without one.";
       }
       if (ctx.quiet) return `not sent: ${ctx.config.host.name} is texting them personally right now, so send nothing. Recording their answers is still fine.`;
@@ -254,7 +258,7 @@ async function runTool(ctx: Ctx, guest: Person, name: string, input: any) {
       if (!["yes", "no", "maybe"].includes(input.status)) return "error: status must be yes, no or maybe";
       const before = householdRsvp(ctx.db, households(ctx.config).get(guest.household)!)?.status;
       if (before === "yes" && input.status !== "yes")
-        await sendText(ctx.db, ctx.config.host.phone, `Heads up: ${guest.name} changed ${guest.household}'s RSVP from yes to ${input.status}.`);
+        await tellHost(ctx.db, ctx.config.host.phone, `Heads up: ${guest.name} changed ${guest.household}'s RSVP from yes to ${input.status}.`);
       ctx.db
         .prepare(`INSERT INTO rsvps (phone, status, headcount, note, ts) VALUES (?, ?, ?, ?, ?)
           ON CONFLICT (phone) DO UPDATE SET status = excluded.status, headcount = excluded.headcount, note = excluded.note, ts = excluded.ts`)
@@ -272,10 +276,10 @@ async function runTool(ctx: Ctx, guest: Person, name: string, input: any) {
       } else if (dish.fallback) {
         const toHost = owns({ dish: "", owner: dish.fallback }, ctx.config.host);
         saveDish(ctx.config.eventFile, dish.dish, { owner: dish.fallback, status: toHost ? "confirmed" : "proposed", declined_by: guest.name });
-        await sendText(ctx.db, ctx.config.host.phone, `${guest.name} can't do ${dish.dish}, so it falls back to ${dish.fallback}.`);
+        await tellHost(ctx.db, ctx.config.host.phone, `${guest.name} can't do ${dish.dish}, so it falls back to ${dish.fallback}.`);
       } else {
         saveDish(ctx.config.eventFile, dish.dish, { status: "proposed", owner: null, declined_by: guest.name });
-        await sendText(ctx.db, ctx.config.host.phone, `${guest.name} can't do ${dish.dish}. It needs a new owner.`);
+        await tellHost(ctx.db, ctx.config.host.phone, `${guest.name} can't do ${dish.dish}. It needs a new owner.`);
       }
       return "recorded";
     }
@@ -296,7 +300,7 @@ async function runTool(ctx: Ctx, guest: Person, name: string, input: any) {
       saveDish(ctx.config.eventFile, dish.dish, { plan: { ...dish.plan, dietary } });
       const misses = dietaryConflicts(ctx.config, dietary);
       if (misses.length)
-        await sendText(ctx.db, ctx.config.host.phone, `${guest.name} says ${dish.dish} is "${dietary}". ⚠️ ${misses.map((m) => `Not ${m.need}, so ${m.person} may not be able to eat it.`).join(" ")}`);
+        await tellHost(ctx.db, ctx.config.host.phone, `${guest.name} says ${dish.dish} is "${dietary}". ⚠️ ${misses.map((m) => `Not ${m.need}, so ${m.person} may not be able to eat it.`).join(" ")}`);
       return "saved";
     }
     case "record_oven_needs": {
@@ -307,7 +311,7 @@ async function runTool(ctx: Ctx, guest: Person, name: string, input: any) {
       if (!Number.isInteger(temp) || temp < 150 || temp > 550) return "error: temp_f must be an oven temperature in °F, like 350";
       const minutes = Number.isInteger(input.minutes) ? input.minutes : undefined;
       const clashes = saveOvenNeeds(ctx.config, dish, temp, minutes);
-      await sendText(ctx.db, ctx.config.host.phone, [
+      await tellHost(ctx.db, ctx.config.host.phone, [
         `${guest.name}: ${dish.dish} needs ${temp}°F${minutes ? ` for ${minutes} min` : ""} in the ${dish.oven.name} oven${input.notes ? ` (${clip(input.notes)})` : ""}.`,
         ...clashes,
       ].join("\n"));
@@ -336,10 +340,10 @@ async function runTool(ctx: Ctx, guest: Person, name: string, input: any) {
 }
 
 /** Runs Claude on the guest's latest message; returns true if they RSVP'd yes this turn. */
-async function runGuestAgent(ctx: Ctx, guest: Person) {
+async function runGuestAgent(ctx: Ctx, guest: Person, text: string) {
   let saidYes = false;
   let writes = 0;
-  const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: "user", content: guestContext(ctx, guest) }];
+  const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: "user", content: guestContext(ctx, guest, text) }];
   const system = systemPrompt(ctx);
   for (let turn = 0; turn < 6; turn++) {
     const res = await ctx.client.beta.messages.create({
@@ -387,12 +391,12 @@ async function handleHost(ctx: Ctx, text: string) {
   const m = text.trim().match(/^#(\d+)\s+([\s\S]+)$/);
   if (m) {
     const esc = db.prepare("SELECT * FROM escalations WHERE id = ?").get(Number(m[1]));
-    if (!esc) return sendText(db, host, `There's no question #${m[1]}.`);
+    if (!esc) return tellHost(db, host, `There's no question #${m[1]}.`);
     const reply = m[2].trim();
     const ok = /^(ok|yes|send)$/i.test(reply);
     const no = esc.dish && /^no\b/i.test(reply); // only dish proposals have a "no"
     const answer = ok ? (esc.suggested as string | null) : no ? reply.slice(2).trim() || `${config.host.name} says let's skip that one this year. Thanks so much for offering!` : reply;
-    if (!answer) return sendText(db, host, `#${esc.id} has no suggested reply. Send "#${esc.id} <your answer>".`);
+    if (!answer) return tellHost(db, host, `#${esc.id} has no suggested reply. Send "#${esc.id} <your answer>".`);
     const guest = config.people.find((p) => p.phone === esc.phone);
     // once the host accepts a dish, ask about any family dietary need it isn't marked as meeting
     const conflicts = esc.dish && ok ? dietaryConflicts(config, String(findDish(config, esc.dish as string)?.plan?.dietary ?? "")) : [];
@@ -401,20 +405,21 @@ async function handleHost(ctx: Ctx, text: string) {
     const question = needs.length ? `\n\nOne quick question: is it ${needs.join(" and ")}? ${who.join(" and ")} ${who.length === 1 ? "needs" : "need"} that.` : "";
     await sendText(db, esc.phone as string, answer + question);
     // a dish proposal stays open until it's settled with ok or no
-    if (!esc.dish || ok || no) db.prepare("UPDATE escalations SET answer = ?, status = 'done' WHERE id = ?").run(answer, esc.id);
+    // settled questions keep no words: the guest has their answer, and the plan holds anything that changed
+    if (!esc.dish || ok || no) db.prepare("UPDATE escalations SET question = '', suggested = NULL, answer = NULL, status = 'done' WHERE id = ?").run(esc.id);
     if (esc.dish && ok) saveDish(config.eventFile, esc.dish as string, { status: "confirmed" });
     if (esc.dish && no) removeDish(config.eventFile, esc.dish as string);
     const outcome = esc.dish ? (ok ? ` ${esc.dish} is on the menu.` : no ? ` ${esc.dish} is off the menu.` : ` ${esc.dish} is still waiting on you: reply "#${esc.id} ok" or "#${esc.id} no" to settle it.`) : "";
-    return sendText(db, host, `Sent to ${guest?.name ?? esc.phone}.${outcome}`);
+    return tellHost(db, host, `Sent to ${guest?.name ?? esc.phone}.${outcome}`);
   }
   const cmd = text.trim().toLowerCase();
-  if (cmd === "status") return sendText(db, host, statusText(config, db));
-  if (cmd === "ovens") return sendText(db, host, ovensText(config));
+  if (cmd === "status") return tellHost(db, host, statusText(config, db));
+  if (cmd === "ovens") return tellHost(db, host, ovensText(config));
   if (cmd === "remind") return sendReminders(ctx, true);
   if (cmd === "changes") {
     const rows = db.prepare("SELECT ts, phone, action, detail FROM changes ORDER BY id DESC LIMIT 10").all();
     const who = (ph: unknown) => config.people.find((p) => p.phone === ph)?.name ?? ph;
-    return sendText(db, host, rows.length
+    return tellHost(db, host, rows.length
       ? "Latest changes from guests' messages:\n" + rows.map((r) => `${new Date(Number(r.ts)).toLocaleString("en-US", { weekday: "short", hour: "numeric", minute: "2-digit" })} ${who(r.phone)}: ${r.action} ${r.detail}`).join("\n")
       : "No changes from guests yet.");
   }
@@ -425,7 +430,7 @@ async function handleHost(ctx: Ctx, text: string) {
   if (reqFor) {
     const who = reqFor[1].trim().toLowerCase();
     const p = config.people.find((p) => [p.name, p.name.split(" ")[0]].some((n) => n.toLowerCase() === who));
-    if (!p) return sendText(db, host, `I don't have anyone called "${reqFor[1].trim()}".`);
+    if (!p) return tellHost(db, host, `I don't have anyone called "${reqFor[1].trim()}".`);
     return sendAll(ctx, requestMessages(ctx, p.household), `${p.household}: `);
   }
   if (cmd === "temps") return sendAll(ctx, tempMessages(ctx));
@@ -434,17 +439,17 @@ async function handleHost(ctx: Ctx, text: string) {
   if (tell) {
     const who = tell[1].trim().toLowerCase();
     const matches = config.people.filter((p) => p.phone && [p.name, p.name.split(" ")[0]].some((n) => n.toLowerCase() === who));
-    if (matches.length !== 1) return sendText(db, host, matches.length ? `More than one "${tell[1].trim()}"; use their full name.` : `I don't have anyone called "${tell[1].trim()}" with a phone number.`);
+    if (matches.length !== 1) return tellHost(db, host, matches.length ? `More than one "${tell[1].trim()}"; use their full name.` : `I don't have anyone called "${tell[1].trim()}" with a phone number.`);
     await sendText(db, matches[0].phone, tell[2].trim());
-    return sendText(db, host, `Sent to ${matches[0].name}.`);
+    return tellHost(db, host, `Sent to ${matches[0].name}.`);
   }
   // "temp gluten-free stuffing 375 25" sets the host's own dish: °F, then optional minutes
   const t = text.trim().match(/^temp\s+(.+?)\s+(\d{3})\s*°?\s*f?(?:\s+(\d{1,3})\s*(?:min(?:utes)?)?)?$/i);
   if (t) {
     const dish = findDish(config, t[1]);
-    if (!dish?.oven) return sendText(db, host, `I can't find an oven dish called "${t[1]}". Text "ovens" to see the names.`);
+    if (!dish?.oven) return tellHost(db, host, `I can't find an oven dish called "${t[1]}". Text "ovens" to see the names.`);
     const clashes = saveOvenNeeds(config, dish, Number(t[2]), t[3] ? Number(t[3]) : undefined);
-    return sendText(db, host, [`Saved: ${dish.dish} at ${t[2]}°F${t[3] ? ` for ${t[3]} min` : ""} in the ${dish.oven.name} oven.`, ...clashes].join("\n"));
+    return tellHost(db, host, [`Saved: ${dish.dish} at ${t[2]}°F${t[3] ? ` for ${t[3]} min` : ""} in the ${dish.oven.name} oven.`, ...clashes].join("\n"));
   }
   const ann = text.trim().match(/^announce\s+([\s\S]+)$/i);
   if (ann) {
@@ -456,12 +461,12 @@ async function handleHost(ctx: Ctx, text: string) {
       return sendAll(ctx, config.people.filter((p) => p.phone).map((p) => ({ phone: p.phone, name: p.name, text: body })), "Announcement: ");
     try {
       await postToGroup(db, group!, body);
-      return sendText(db, host, "Posted to the group.");
+      return tellHost(db, host, "Posted to the group.");
     } catch (err) {
-      return sendText(db, host, `Couldn't post: ${(err as Error).message}`);
+      return tellHost(db, host, `Couldn't post: ${(err as Error).message}`);
     }
   }
-  return sendText(db, host, `Commands: "status", "ovens", "changes", "remind", "rsvp", "request", "request <name>", "temps", "temp <dish> <°F> [minutes]", "tell <name>: <message>", "announce <message>", "#<n> ok", "#<n> no", "#<n> <your answer>".\n\n${openQuestions(db, config)}`);
+  return tellHost(db, host, `Commands: "status", "ovens", "changes", "remind", "rsvp", "request", "request <name>", "temps", "temp <dish> <°F> [minutes]", "tell <name>: <message>", "announce <message>", "#<n> ok", "#<n> no", "#<n> <your answer>".\n\n${openQuestions(db, config)}`);
 }
 
 type Outgoing = { phone: string; name: string; text: string; sent?: () => void };
@@ -535,8 +540,11 @@ function tempMessages({ config }: Ctx): Outgoing[] {
 
 const DAY = 24 * 3600_000;
 
+/** Two days after the event, even the bot's own texts are cleared: nothing is left to follow up. */
+export const FORGET_AFTER_EVENT_MS = 2 * 24 * 3600_000;
+
 /** The event day, from event.date ("Thursday, November 26") and the year in the title. */
-function eventDay(config: Config) {
+export function eventDay(config: Config) {
   const year = String(config.event.title).match(/\d{4}/)?.[0] ?? String(new Date().getFullYear());
   const d = new Date(`${String(config.event.date).replace(/^\w+,\s*/, "")} ${year}`);
   return Number.isNaN(+d) ? undefined : d;
@@ -578,7 +586,7 @@ export function reminderMessages({ config, db }: Ctx, now = new Date(), anyHour 
 export async function sendReminders(ctx: Ctx, anyHour = false) {
   const outgoing = reminderMessages(ctx, new Date(), anyHour);
   if (outgoing.length) return sendAll(ctx, outgoing, "Daily reminders: ");
-  if (anyHour) return sendText(ctx.db, ctx.config.host.phone, "No reminders due: everyone has answered or heard from me in the last 24 hours.");
+  if (anyHour) return tellHost(ctx.db, ctx.config.host.phone, "No reminders due: everyone has answered or heard from me in the last 24 hours.");
 }
 
 /** After a yes: let the rest of the household know, then send the household's dish requests. */
@@ -610,7 +618,7 @@ async function sendAll({ config, db }: Ctx, outgoing: Outgoing[], prefix = "") {
     }
   }
   const summary = sent.length ? `Sent to ${sent.length}: ${sent.join(", ")}` : "Nobody left to send to.";
-  return sendText(db, config.host.phone, prefix + (failed.length ? `${summary}\nFailed: ${failed.join(", ")}` : summary));
+  return tellHost(db, config.host.phone, prefix + (failed.length ? `${summary}\nFailed: ${failed.join(", ")}` : summary));
 }
 
 function openQuestions(db: Db, config: Config) {
@@ -670,52 +678,68 @@ export function statusText(config: Config, db: Db) {
     `\n📝 not asked yet · ⏳ asked · ✅ confirmed · 💡 offered, needs your ok\n\n${openQuestions(db, config)}`;
 }
 
-/** Did the bot itself send this text to this number recently? Used to tell its echoes from what the host typed. */
-const botSent = (db: Db, phone: string, text: string) =>
-  !!db.prepare("SELECT 1 FROM messages WHERE phone = ? AND direction = 'out' AND wa_id IS NULL AND body = ? AND ts > ?").get(phone, text, Date.now() - 24 * 3600_000);
+/** Did the bot itself send a text with this fingerprint to this number lately? Tells its echoes from the host's own texts. */
+const botSent = (db: Db, phone: string, hash: string) =>
+  !!db.prepare("SELECT 1 FROM messages WHERE phone = ? AND direction = 'out' AND wa_id IS NULL AND hash = ? AND ts > ?").get(phone, hash, Date.now() - 24 * 3600_000);
 
-/** The host texted this guest personally within the handoff window. */
+/** The host texted this guest personally within the handoff window. Only the time is known, never the words. */
 const hostTalking = (db: Db, phone: string, now = Date.now()) =>
   !!db.prepare(`SELECT 1 FROM messages WHERE phone = ? AND ${BY_HOST} AND ts > ?`).get(phone, now - HANDOFF_MS);
 
+/** The bot texted this person recently, so it may be waiting on an answer. */
+const openThread = (db: Db, phone: string, now = Date.now()) =>
+  !!db.prepare("SELECT 1 FROM messages WHERE phone = ? AND direction = 'out' AND wa_id IS NULL AND ts > ?").get(phone, now - OPEN_THREAD_MS);
+
+/**
+ * Handles one text. Its words are used only while it's handled, and never stored: the database keeps that a message
+ * arrived, and whatever it changed (an RSVP, a dish, a question for the host).
+ */
 export async function handleInbound(ctx: Ctx, msg: Inbound) {
   const { config, db } = ctx;
   const from = phoneKey(msg.from);
   const shared = sharesHostNumber();
-  // the bot's own texts show up again when it texts from the host's number; skip them
-  if (shared && (msg.mine || from === config.host.phone) && botSent(db, from, msg.text)) return;
-  if (msg.mine) return void logMessage(db, from, "out", msg.text, msg.waId); // the host texting someone personally
-  if (!logMessage(db, from, "in", msg.text, msg.waId)) return; // duplicate delivery
-  if (from === config.host.phone) return handleHost(ctx, msg.text);
+  if (msg.mine) {
+    // the host texting someone personally: note when (so the bot steps back), unless it's the bot's own text
+    if (shared && !(msg.hash && botSent(db, from, msg.hash))) logMessage(db, from, "out", "", msg.waId);
+    return;
+  }
+  // the bot's replies to the host land in the host's chat with themselves; skip them
+  if (shared && from === config.host.phone && botSent(db, from, textHash(msg.text))) return;
   const guest = config.people.find((p) => p.phone === from);
-  // on the host's own number, strangers are the host's business, not the bot's
-  if (!guest) return shared ? undefined : sendText(db, config.host.phone, `Message from unknown ${from ? `number +${from}` : msg.from}: ${msg.text}`);
+  // on the host's own number, only people the bot is talking with are its business; nothing else is read or kept
+  if (shared && from !== config.host.phone && (!guest || !openThread(db, from))) return;
+  if (!logMessage(db, from, "in", "", msg.waId)) return; // duplicate delivery
+  if (from === config.host.phone) return handleHost(ctx, msg.text);
+  if (!guest) return tellHost(db, config.host.phone, `Message from unknown ${from ? `number +${from}` : msg.from}: ${msg.text}`);
+  // on the host's own number they already see the text in their thread, so notices don't repeat it
+  const quote = (n = LIMITS.field) => (shared ? "" : `: "${clip(msg.text, n)}"`);
   try {
     const sent = recentMessages(db, from);
     if (sent > LIMITS.messagesPerHour) {
       if (sent === LIMITS.messagesPerHour + 1)
-        await sendText(db, config.host.phone, `⚠️ ${guest.name} has sent over ${LIMITS.messagesPerHour} messages this hour, so I've paused auto-replies to them for now. Latest: "${clip(msg.text, 200)}"`);
+        await tellHost(db, config.host.phone, `⚠️ ${guest.name} has sent over ${LIMITS.messagesPerHour} messages this hour, so I've paused auto-replies to them for now${quote(200)}`);
       return;
     }
     // only relevant messages reach the agent and its tools
-    const history = db.prepare(`SELECT direction, body, ${BY_HOST} AS by_host FROM messages WHERE phone = ? ORDER BY id DESC LIMIT 6`).all(from).reverse() as { direction: string; body: string; by_host: number }[];
+    const mineSoFar = db.prepare("SELECT body FROM messages WHERE phone = ? AND direction = 'out' AND wa_id IS NULL AND body != '' ORDER BY id DESC LIMIT 5").all(from).reverse();
+    const history = [...mineSoFar.map((r) => ({ direction: "out", body: String(r.body) })), { direction: "in", body: msg.text }];
     const { verdict, reason } = await screenMessage(ctx.client, guest, history, shared ? config.host.name : undefined);
     if (verdict === "off_topic" && shared) return; // everyday texts to the host: not the bot's to answer
     if (verdict === "off_topic") return sendText(db, from, `I'm ${config.persona.name}, ${config.host.name}'s Thanksgiving helper, so I can only help with Thanksgiving plans. ${config.persona.signoff ?? ""}`.trim());
     if (verdict === "suspicious") {
-      logChange(db, from, "held_message", clip(`${reason}: ${msg.text}`, 500));
-      return sendText(db, config.host.phone, `⚠️ Held a message from ${guest.name} without replying (${clip(reason, 150)}):\n"${clip(msg.text)}"\nIf it needs an answer: tell ${guest.name.split(" ")[0]}: <your message>`);
+      logChange(db, from, "held_message", ""); // that a message was held, not what it said
+      return tellHost(db, config.host.phone, `⚠️ Held a message from ${guest.name} without replying (${clip(reason, 150)})${shared ? ". It's in your thread with them." : `:\n"${clip(msg.text)}"`}\nIf it needs an answer: tell ${guest.name.split(" ")[0]}: <your message>`);
     }
     // event-driven: a yes gets the bot's confirmation reply first, then that household's dish requests
     // the host is mid-conversation with them: record what they say, but leave the replying to the host
     if (shared && hostTalking(db, from)) {
-      if (await runGuestAgent({ ...ctx, quiet: true }, guest))
-        await sendText(db, config.host.phone, `${guest.name} said yes while you were texting them, so I've recorded it. Text "request ${guest.name.split(" ")[0]}" when you'd like me to send their dish requests.`);
+      if (await runGuestAgent({ ...ctx, quiet: true }, guest, msg.text))
+        await tellHost(db, config.host.phone, `${guest.name} said yes while you were texting them, so I've recorded it. Text "request ${guest.name.split(" ")[0]}" when you'd like me to send their dish requests.`);
       return;
     }
-    if (await runGuestAgent(ctx, guest)) await followUpRequests(ctx, guest);
+    if (await runGuestAgent(ctx, guest, msg.text)) await followUpRequests(ctx, guest);
   } catch (err) {
     console.error(`agent failed for ${guest.name}`, err);
-    await sendText(db, config.host.phone, `⚠️ I hit an error answering ${guest.name}: "${msg.text}". Please reply to them directly.`);
+    await tellHost(db, config.host.phone, `⚠️ I hit an error answering ${guest.name}${quote()}. Please reply to them directly.`);
   }
 }
