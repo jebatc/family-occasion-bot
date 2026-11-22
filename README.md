@@ -115,7 +115,7 @@ Family members can't make the bot run code or change things they shouldn't:
 
 Two agents handle texts:
 
-- **Triage** sees every text first. It checks who sent it, whether it's someone the assistant is talking with, and, using a small screening model, whether it's about the occasion. It **stores nothing**. A text it turns away (off-topic, suspicious, from a stranger, or one it couldn't check) leaves no record, and neither do its own replies and notices to you. What it remembers while running stays in memory: texts it has already seen, hourly counts per person, and when you last texted someone.
+- **Triage** sees every text first. It checks who sent it, whether it's someone the assistant is talking with, and, using a small screening model, whether it's about the occasion. It **stores nothing**. A text it turns away (off-topic, suspicious, from a stranger, or one it couldn't check) leaves no record, and neither do its own replies and notices to you. What it remembers while running stays in memory: texts it has already seen, and hourly counts per person.
 - **The assistant** (Tom) gets only the texts triage refers to it. It keeps those, its replies and your commands as its conversation history, like any app would.
 
 Triage is separate from Tom, so other agents can be added later with their own rules.
@@ -165,8 +165,8 @@ By default (`TEXT_AS=me`) the assistant texts **from your own number**, through 
 
 Because it's your own number, the assistant keeps out of your personal texts:
 - **It only reads threads it started.** A text is looked at only if it's from someone in `family.yaml` whom the assistant has texted in the last 2 days. Everything else is never read, never sent to Claude and never recorded. Daily nudges keep the thread open with anyone it's still waiting on.
-- **Your own texts stay yours.** Neither agent sees the words of what you text people. Triage only notes, in memory, that you texted someone and when, so the assistant can step back: if you've texted someone in the last 30 minutes, it doesn't reply to them. It still records an RSVP or dish answer from what they say, and tells you if they said yes.
-- **Only the occasion.** Within those threads, triage's screening model decides whether each text is about the gathering. Anything else never reaches the assistant, and when triage is unsure, it stays out.
+- **Your own texts stay yours.** What you text people yourself never reaches either agent. Only your texts to yourself (commands) do.
+- **Only the occasion.** Within those threads, triage's screening model decides whether each text touches the gathering or its logistics (food, timing, travel, where people are staying). Those go to the assistant whole, even when they include personal news. Texts with nothing about the gathering never reach it.
 
 **Carrier limits.** iMessages go through Apple, not your carrier. SMS go out from your iPhone like ordinary texts. Carriers watch for spam-like volume, typically hundreds of near-identical texts quickly, and a family's invitations are far below that. The assistant also spaces out bulk sends by a few seconds. Expect a burst of a dozen or two texts when you send `rsvp`, then a trickle.
 

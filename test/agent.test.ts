@@ -711,29 +711,13 @@ test("texting as you: only people Tom is talking with are read at all", () =>
     assert.equal(screens.length, 1);
   }));
 
-test("texting as you: your own texts reach triage only as a time, and Tom's echoes are skipped", () =>
-  asHost(async () => {
-    tomTexted(SUE, "It's at 2! — Tom 🦃");
-    await handleInbound({ config, db, client: null as any }, { waId: "w1", from: SUE, text: "", mine: true, hash: textHash("It's at 2! — Tom 🦃") });
-    assert.equal(triageState.hostTexted.has(SUE), false, "Tom's own text came back and was skipped");
-    await handleInbound({ config, db, client: null as any }, { waId: "w2", from: SUE, text: "", mine: true, hash: textHash("Can't wait to see you!") });
-    assert.equal(triageState.hostTexted.has(SUE), true, "noted, in memory, that you texted");
-    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM messages").get()?.n, 1, "Tom's database only has his own text");
-  }));
-
-test("texting as you: while you're talking with someone, the bot records but stays quiet", () =>
+test("texting as you: your own texts to people are ignored entirely", () =>
   asHost(async () => {
     tomTexted(SUE);
-    await handleInbound({ config, db, client: null as any }, { waId: "w1", from: SUE, text: "", mine: true, hash: textHash("Are you guys hosting?") });
-    const { client, requests } = fakeClient([
-      turn(toolUse("a", "record_rsvp", { status: "yes" }), toolUse("b", "reply", { text: "Yay! — Tom 🦃" })),
-      done,
-    ]);
-    await handleInbound({ config, db, client }, { waId: "w2", from: SUE, text: "Yes! We'll be there" });
-    assert.equal(outbound(SUE).length, 0, "no reply from Tom mid-conversation");
-    assert.match(JSON.stringify(requests[1].messages.at(-1).content), /not sent/);
-    assert.match(outbound(HOST).at(-1)!, /Aunt Sue said yes while you were texting them/);
-    assert.equal(db.prepare("SELECT status FROM rsvps WHERE phone = ?").get(SUE)?.status, "yes");
+    const { client, requests, screens } = fakeClient([done]);
+    await handleInbound({ config, db, client }, { waId: "w1", from: SUE, text: "Love you, see you soon", mine: true });
+    assert.equal(screens.length + requests.length, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM messages").get()?.n, 1, "only Tom's own text");
   }));
 
 test("triage stores nothing: only texts it refers to Tom reach his database", async () => {

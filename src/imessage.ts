@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { type Inbound, type Transport, textHash } from "./transport.ts";
+import type { Inbound, Transport } from "./transport.ts";
 
 /**
  * The Mac Messages transport: sends through the Messages app (AppleScript) and reads replies from its database.
@@ -163,8 +163,7 @@ export function inboundFilter(opts: { host?: string; selfHandles?: string[] }) {
       lastSelf = { text: m.text, at: m.ts ?? 0 };
       return { waId: m.waId, from: opts.host, text: m.text, ...(m.ts ? { ts: m.ts } : {}) };
     }
-    // what the host texts other people stays theirs: the bot learns only when, plus a fingerprint to spot its own texts
-    if (m.mine) return { waId: m.waId, from: m.from, text: "", mine: true, hash: textHash(m.text), ...(m.ts ? { ts: m.ts } : {}) };
+    if (m.mine) return; // what the host texts other people never reaches the bot
     return m;
   };
 
@@ -173,7 +172,7 @@ export function inboundFilter(opts: { host?: string; selfHandles?: string[] }) {
 
 /**
  * host: the host's phone (digits) when the bot texts from the host's own Apple ID. Then the host's texts to
- * themselves ("message yourself") are commands, and what the host types to anyone else comes through as `mine`.
+ * themselves ("message yourself") are commands, and what the host types to anyone else is ignored.
  * selfHandles: other handles the host's self-chat may use, such as their Apple ID email.
  */
 export function imessage(opts: { chatDb?: string; run?: RunScript; failCheckMs?: number; host?: string; selfHandles?: string[] } = {}): Transport {

@@ -5,9 +5,8 @@ import { type Inbound, sendOnly, textHash } from "./transport.ts";
 
 /**
  * Triage: the standalone agent every incoming text goes through first. It decides who a text is from, whether it's
- * about a project, and whether the host is busy talking with that person, then refers only what a project should
- * handle. It stores nothing: what it turns away leaves no trace, and the little it remembers (texts already seen,
- * hourly counts, when the host last texted someone) lives in memory only.
+ * about a project, then refers only what a project should handle. It stores nothing: what it turns away leaves no
+ * trace, and the little it remembers (texts already seen, hourly counts) lives in memory only.
  *
  * A project is anything that wants texts referred to it. Tom is one; a follow-up agent could be another.
  */
@@ -29,18 +28,12 @@ export interface Project {
   handle(r: Referral): Promise<void>;
 }
 
-/**
- * fromHost: a command from the host. quiet: the host is texting this person personally right now, so the project
- * should record what they say but leave the replying to the host.
- */
-export type Referral = { waId: string; from: string; text: string; ts?: number; fromHost?: boolean; quiet?: boolean };
-
-/** When the bot texts from the host's own number: how long after the host texts someone personally it stays out of it. */
-export const HANDOFF_MS = 30 * 60_000;
+/** fromHost: a command from the host. */
+export type Referral = { waId: string; from: string; text: string; ts?: number; fromHost?: boolean };
 
 /** Kept in memory only, for as long as the process runs. */
-export type TriageState = { seen: Set<string>; hostTexted: Map<string, number>; recent: Map<string, number[]> };
-export const newTriageState = (): TriageState => ({ seen: new Set(), hostTexted: new Map(), recent: new Map() });
+export type TriageState = { seen: Set<string>; recent: Map<string, number[]> };
+export const newTriageState = (): TriageState => ({ seen: new Set(), recent: new Map() });
 
 /** shared: the bot texts from the host's own number, so it also sees the host's personal texts. */
 export function triage(opts: { project: Project; client: Anthropic; shared: boolean; state?: TriageState }) {
@@ -63,11 +56,7 @@ export function triage(opts: { project: Project; client: Anthropic; shared: bool
     const from = phoneKey(msg.from);
     const host = project.hostPhone();
 
-    if (msg.mine) {
-      // the host texting someone personally: only when matters, so the project can step back; never the words
-      if (shared && !(msg.hash && project.sent(from, msg.hash))) state.hostTexted.set(from, msg.ts ?? now);
-      return;
-    }
+    if (msg.mine) return; // the host's own texts to people are theirs
     if (from === host) {
       // the project's replies to the host land in the host's chat with themselves; skip them
       if (shared && project.sent(host, textHash(msg.text))) return;
@@ -103,7 +92,6 @@ export function triage(opts: { project: Project; client: Anthropic; shared: bool
     if (verdict === "suspicious")
       return tellHost(`⚠️ Held a message from ${person.name} without replying (${clip(reason, 150)})${shared ? ". It's in your thread with them." : `:\n"${clip(msg.text)}"`}\nIf it needs an answer: tell ${person.name.split(" ")[0]}: <your message>`);
 
-    const talking = shared && now - (state.hostTexted.get(from) ?? 0) < HANDOFF_MS;
-    return project.handle({ waId: msg.waId, from, text: msg.text, ts: msg.ts, ...(talking ? { quiet: true } : {}) });
+    return project.handle({ waId: msg.waId, from, text: msg.text, ts: msg.ts });
   };
 }

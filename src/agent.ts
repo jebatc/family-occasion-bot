@@ -8,8 +8,7 @@ import { sendText, postToGroup, hasGroup, pause, sharesHostNumber } from "./tran
 import type { Project, Referral } from "./triage.ts";
 
 const MODEL = "claude-opus-5-5";
-/** quiet: the host is texting this guest personally, so the agent records things but sends nothing to them. */
-export type Ctx = { config: Config; db: Db; client: Anthropic; quiet?: boolean };
+export type Ctx = { config: Config; db: Db; client: Anthropic };
 
 /** When Tom texts from the host's own number, triage only refers texts from people he has texted within this window. */
 export const OPEN_THREAD_MS = 2 * 24 * 3600_000;
@@ -250,7 +249,6 @@ async function runTool(ctx: Ctx, guest: Person, name: string, input: any) {
         await tellHost(ctx.db, ctx.config.host.phone, `⚠️ Held a reply to ${guest.name} because it contained a phone number:\n${text}`);
         return "error: reply blocked because it contained a phone number. Never share phone numbers; send a reply without one.";
       }
-      if (ctx.quiet) return `not sent: ${ctx.config.host.name} is texting them personally right now, so send nothing. Recording their answers is still fine.`;
       await sendText(ctx.db, guest.phone, text);
       return "sent";
     }
@@ -289,7 +287,6 @@ async function runTool(ctx: Ctx, guest: Person, name: string, input: any) {
       const file = join(ctx.config.dataDir, recipe);
       const text = /^https?:\/\//.test(recipe) ? recipe : existsSync(file) ? readFileSync(file, "utf8") : undefined;
       if (!text) return "the recipe file is missing; escalate if they still want it";
-      if (ctx.quiet) return `not sent: ${ctx.config.host.name} is texting them personally right now; escalate so ${ctx.config.host.name} can send it`;
       await sendText(ctx.db, guest.phone, text);
       return "sent";
     }
@@ -708,12 +705,6 @@ export async function handleReferral(ctx: Ctx, r: Referral) {
   const guest = config.people.find((p) => p.phone === r.from);
   if (!guest) return;
   try {
-    // the host is mid-conversation with them: record what they say, but leave the replying to the host
-    if (r.quiet) {
-      if (await runGuestAgent({ ...ctx, quiet: true }, guest, r.text, r.waId))
-        await tellHost(db, config.host.phone, `${guest.name} said yes while you were texting them, so I've recorded it. Text "request ${guest.name.split(" ")[0]}" when you'd like me to send their dish requests.`);
-      return;
-    }
     // event-driven: a yes gets the bot's confirmation reply first, then that household's dish requests
     if (await runGuestAgent(ctx, guest, r.text, r.waId)) await followUpRequests(ctx, guest);
   } catch (err) {

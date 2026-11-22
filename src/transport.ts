@@ -1,12 +1,8 @@
 import { createHash } from "node:crypto";
 import { type Db, logMessage } from "./db.ts";
 
-/**
- * One text. waId is the transport's own message id, used to skip redeliveries.
- * mine: the host texted `from` personally (only when the bot texts from the host's own number). Its words never
- * reach the bot: text is empty, and hash only lets the bot tell its own sent texts from the host's.
- */
-export type Inbound = { waId: string; from: string; text: string; ts?: number; mine?: boolean; hash?: string };
+/** One text. waId is the transport's own message id, used to skip redeliveries. mine: sent from this account. */
+export type Inbound = { waId: string; from: string; text: string; ts?: number; mine?: boolean };
 
 /** A fingerprint of a text, so the bot can recognize its own messages without keeping their words. */
 export const textHash = (text: string) => createHash("sha256").update(text.trim()).digest("hex").slice(0, 32);

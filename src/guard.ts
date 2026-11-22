@@ -29,9 +29,8 @@ Judge only the newest message, using the recent conversation for context. Short 
 const sharedNumberNote = (host: string) => `
 
 The assistant texts from ${host}'s own phone number, so ${host} gets everyday personal texts from these same people. ${host}'s own personal messages are never shown. Here:
-- relevant means the newest message is about the gathering, or clearly answers something the Assistant asked.
-- off_topic includes everything else, including personal chat, and greetings, thanks or emoji that aren't replying to the Assistant.
-When unsure, choose off_topic: ${host} will see the message on their own phone either way.`;
+- relevant means the newest message touches the gathering or its logistics in any way (who's coming, food, timing, travel, where people are staying, getting there), or answers something the Assistant asked. A message that mixes personal news with anything about the gathering is relevant.
+- off_topic means nothing in it concerns the gathering: purely personal chat, or greetings, thanks or emoji that aren't replying to the Assistant.`;
 
 /** Asks a small model whether the guest's newest message should be answered. Throws on API errors: the caller holds the message. */
 /** hostName: set when the assistant texts from the host's own number, so most of what arrives is ordinary personal texting. */
