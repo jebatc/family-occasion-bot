@@ -1,10 +1,10 @@
 # Holiday Coordinator
 
-A WhatsApp assistant for hosting family gatherings. It sends the invitations, keeps track of who's coming by household, asks people to bring dishes, answers their questions from your plan, sends daily nudges to anyone who hasn't answered, and checks with you on anything it isn't sure about. You run it by texting it, and your family just texts it like a person.
+A texting assistant for hosting family gatherings. It sends the invitations, keeps track of who's coming by household, asks people to bring dishes, answers their questions from your plan, sends daily nudges to anyone who hasn't answered, and checks with you on anything it isn't sure about. You run it by texting it, and your family just texts it like a person.
 
 It was built for a family Thanksgiving, but nothing in it is Thanksgiving-specific. A birthday dinner, a reunion, a holiday brunch or a potluck works the same way: you describe the occasion in a few plain files, and the assistant takes on a persona you choose ("Tom the Turkey 🦃" for Thanksgiving, someone else for the next occasion).
 
-> **Read this first.** The assistant uses [Baileys](https://github.com/WhiskeySockets/Baileys) to run on a WhatsApp number linked as a device, the same way WhatsApp Web links. It's not an official WhatsApp API. Meta's official API is for businesses and turned down our family use, so this is the practical route, but automating a number this way is against WhatsApp's terms and the number can be banned. **Use a spare number, never your personal one,** and keep it to family-sized volume. The bot spaces out bulk messages to help.
+> **How it texts.** By default the assistant runs on a Mac through the **Messages app**: iPhone relatives get iMessages, and everyone else gets ordinary SMS relayed through an iPhone. It needs its own Apple ID and, for SMS, its own phone number (see [Setting up Messages](#setting-up-messages)). A WhatsApp mode is still there (`TRANSPORT=whatsapp`). It uses [Baileys](https://github.com/WhiskeySockets/Baileys), an unofficial WhatsApp client, which is against WhatsApp's terms and can get the number banned, so use it only with a spare number.
 
 ## What it's like
 
@@ -34,7 +34,7 @@ And for you, the host:
 
 ## How an occasion flows
 
-1. **Announce.** You text the bot `announce …`, and it posts an introduction to your family's WhatsApp group.
+1. **Announce.** You text the bot `announce …`, and it texts an introduction to everyone (or posts it to a family group chat, if you set `GROUP_NAME`).
 2. **Invite.** You text `rsvp`. Each household gets one invitation, addressed to everyone in it, or custom text for a household (for example, the people staying over the night before).
 3. **Confirm.** When anyone replies YES, the bot confirms, lets the rest of their household know, and counts the whole household. Kids without phones are counted but never texted.
 4. **Request.** Right after a yes, that household gets its dish requests: one message per person, listing what you've asked them to bring.
@@ -116,29 +116,49 @@ Family members can't make the bot run code or change things they shouldn't:
 You'll need:
 - Node 24 or newer
 - an [Anthropic API key](https://console.anthropic.com)
-- a spare phone number with WhatsApp (the WhatsApp Business app works well, and can run next to your personal WhatsApp on the same phone)
-- a computer that stays on during the planning weeks (a Mac is easiest; see below)
+- a Mac that stays on during the planning weeks
+- an Apple ID for the assistant, and ideally a spare iPhone with its own number (see [Setting up Messages](#setting-up-messages))
 
 ```bash
 npm install
 mkdir -p private && cp -R examples/data/* private/ && cp examples/env.example private/.env
 ```
 
-1. **Fill in the settings.** In `private/.env`, set `ANTHROPIC_API_KEY`, `WA_BOT_PHONE` (the spare number) and `WA_GROUP_NAME` (your family group's exact name). Add the spare number to that group.
+1. **Fill in the settings.** In `private/.env`, set `ANTHROPIC_API_KEY`. `TRANSPORT=messages` is the default. To post announcements to a group chat instead of texting everyone, set `GROUP_NAME` to the chat's exact name in Messages.
 2. **Describe your occasion.** Edit `private/family.yaml` and the files under `private/holidays/`.
-3. **Try it without sending anything.** These run messages through the real AI but don't send to WhatsApp or save anything:
+3. **Try it without sending anything.** These run messages through the real AI but don't send any texts or save anything:
    ```bash
    npm run hc -- simulate host "rsvp"
    ```
    ```bash
    npm run hc -- simulate "Aunt Sue" "what time should we get there?"
    ```
-4. **Link WhatsApp.** Start the bot:
+4. **Set up Messages** (below), then check the Mac can read and send texts:
+   ```bash
+   npm run hc -- check
+   ```
+5. **Start the bot:**
    ```bash
    npm run hc -- serve
    ```
-   It prints an 8-character code. On the spare phone, go to WhatsApp → Settings → Linked devices → Link a device → "Link with phone number instead", and enter it.
-5. **Text it `status`** from your own phone to check it's working.
+6. **Text it `status`** from your own phone to check it's working. Then text yourself `tell <your name>: test` from the bot to check sending.
+
+### Setting up Messages
+
+The bot sends from whichever Apple ID is signed in to Messages on the Mac, and treats any text it sends as its own. So it needs **its own Apple ID**, separate from yours. Otherwise it would text your family as you, and your commands would look like its own messages.
+
+1. **Give the assistant an identity.** Pick one:
+   - **Best:** a spare iPhone with a prepaid SIM, signed in to the assistant's Apple ID. That reaches everyone: iPhones get iMessage, and Android phones get SMS through the spare iPhone. On that iPhone, go to Settings → Apps → Messages → Text Message Forwarding and turn on the Mac. Keep the iPhone charged and on Wi-Fi.
+   - **iMessage only:** an Apple ID with just an email address. No extra phone is needed, but relatives without iPhones can't be reached.
+2. **Sign the Mac in.** Messages is per macOS user. If your own Messages is signed in to your Apple ID, create a separate macOS user for the assistant (System Settings → Users & Groups), log in to it, and sign Messages in there with the assistant's Apple ID. Run the bot from that user. Fast User Switching keeps it running while you use your own account.
+3. **Give permissions.** In that user, go to System Settings → Privacy & Security → Full Disk Access and add Terminal and node. To find node's real file, run `realpath $(which node)` and press ⌘⇧G in the file picker to paste the path. The first `npm run hc -- check` also asks to let Terminal control Messages; allow it.
+4. **Tell people it's coming.** Ask everyone to save the assistant's number (or email) as a contact, so the first text isn't filtered as unknown.
+
+If an iMessage can't be delivered (the person isn't on iMessage), the bot sends it again as SMS. After that, it uses SMS with that person.
+
+### WhatsApp mode
+
+Set `TRANSPORT=whatsapp`, `WA_BOT_PHONE` (a spare WhatsApp number, digits with country code) and `GROUP_NAME` (your family WhatsApp group, with the spare number added to it). `npm run hc -- serve` prints an 8-character code. On the spare phone, go to WhatsApp → Settings → Linked devices → Link a device → "Link with phone number instead", and enter it.
 
 ### Keeping it running
 
@@ -150,18 +170,20 @@ npm run bot:install
 
 `bot:status`, `bot:logs`, `bot:restart` (after changing code) and `bot:uninstall` manage it. If it's offline for a while, it catches up on messages from the last 3 days when it reconnects.
 
-A MacBook still sleeps when its lid closes. To run it lid-closed while plugged in, `sudo pmset -a disablesleep 1` keeps it awake. Turn that off again with `0` after the occasion. An always-on machine such as a Raspberry Pi also works, and a home internet connection is safer for WhatsApp than a cloud server.
+A MacBook still sleeps when its lid closes. To run it lid-closed while plugged in, `sudo pmset -a disablesleep 1` keeps it awake. Turn that off again with `0` after the occasion. An always-on machine such as a Raspberry Pi also works, but the Messages mode needs a Mac.
 
 ## What it costs
 
 - **AI:** each message the bot answers is a short Claude conversation plus a quick screening check, so a few cents at most. A whole holiday's back-and-forth with a family is typically a few dollars.
-- **Everything else:** WhatsApp is free. You need the spare number and a computer that stays on.
+- **Everything else:** iMessage is free, and SMS costs whatever the spare iPhone's plan charges (a basic prepaid plan is plenty). You need a Mac that stays on.
 
 ## How it's built
 
 TypeScript on Node with no build step:
 - `src/agent.ts`: the conversation logic, built on Claude tool use
 - `src/guard.ts`: screening and limits
+- `src/transport.ts`: sending and receiving, whichever way the bot texts
+- `src/imessage.ts`: the Mac Messages app (AppleScript to send, its database to receive)
 - `src/whatsapp.ts`: the Baileys connection
 - `src/config.ts`: reading and writing your YAML files, preserving your comments
 - `src/db.ts`: SQLite for messages, RSVPs and questions
@@ -170,11 +192,12 @@ TypeScript on Node with no build step:
 npm test
 ```
 
-The tests use stand-ins for Claude and WhatsApp, so they're free and work offline.
+The tests use stand-ins for Claude, Messages and WhatsApp, so they're free and work offline.
 
 ## Limitations
 
-- **WhatsApp terms:** see the note at the top. A banned number would mean starting over with a new one.
+- **Messages:** sending relies on AppleScript control of the Messages app, which Apple changes from time to time. Run `npm run hc -- check` after macOS updates. Group chats that mix iPhones and Android phones (MMS) are unreliable to post to, so leaving `GROUP_NAME` empty and texting individually is the safer default.
+- **WhatsApp terms** (WhatsApp mode only): see the note at the top. A banned number would mean starting over with a new one.
 - **One coordinator:** it's built around a single host texting commands.
 - **Uptime:** replies only happen while the computer running it is on. Missed messages are caught up within 3 days.
 - **Judgment:** the screening model can occasionally misjudge a message. Held messages come to you, and you can answer with `tell`.

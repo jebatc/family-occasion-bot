@@ -131,9 +131,22 @@ test("host texts rsvp and request to send them out", async () => {
 });
 
 test("host announce posts to the family group with the persona", async () => {
-  await handleInbound({ config, db, client: null as any }, { waId: "w1", from: HOST, text: "announce Parking is on the street!" });
+  process.env.GROUP_NAME = "Family";
+  try {
+    await handleInbound({ config, db, client: null as any }, { waId: "w1", from: HOST, text: "announce Parking is on the street!" });
+  } finally {
+    delete process.env.GROUP_NAME;
+  }
   assert.equal(outbound("group")[0], "🦃 Parking is on the street!\n— Tom 🦃");
   assert.equal(outbound(HOST)[0], "Posted to the group.");
+});
+
+test("without a group chat, announce texts everyone with a phone", async () => {
+  await handleInbound({ config, db, client: null as any }, { waId: "w1", from: HOST, text: "announce Parking is on the street!" });
+  assert.equal(outbound("group").length, 0);
+  assert.deepEqual(outbound(SUE), ["🦃 Parking is on the street!\n— Tom 🦃"]);
+  assert.deepEqual(outbound(BOB), ["🦃 Parking is on the street!\n— Tom 🦃"]);
+  assert.match(outbound(HOST)[0], /^Announcement: Sent to \d+: Aunt Sue, Uncle Bob/);
 });
 
 test("inbound filtering and phone lookup", () => {

@@ -4,7 +4,9 @@ import Anthropic from "@anthropic-ai/sdk";
 import { DATA_DIR, loadConfig, phoneKey } from "./config.ts";
 import { openDb, lastMessageTs } from "./db.ts";
 import { handleInbound, ovensText, sendReminders, statusText } from "./agent.ts";
-import { connect } from "./whatsapp.ts";
+import { useTransport } from "./transport.ts";
+import { whatsapp } from "./whatsapp.ts";
+import { imessage, checkMessages } from "./imessage.ts";
 
 const [cmd, ...args] = process.argv.slice(2);
 // keys that aren't scoped to a workspace must name one on every request
@@ -37,12 +39,20 @@ switch (cmd) {
     break;
   }
 
+  case "check":
+    console.log(await checkMessages());
+    break;
+
   case "serve": {
-    const missing = ["ANTHROPIC_API_KEY", "WA_BOT_PHONE"].filter((k) => !process.env[k]);
+    const kind = (process.env.TRANSPORT ?? "messages").toLowerCase();
+    if (!["messages", "whatsapp"].includes(kind)) throw new Error(`TRANSPORT must be "messages" or "whatsapp", not "${kind}"`);
+    const missing = ["ANTHROPIC_API_KEY", ...(kind === "whatsapp" ? ["WA_BOT_PHONE"] : [])].filter((k) => !process.env[k]);
     if (missing.length) throw new Error(`Set these in private/.env: ${missing.join(", ")}`);
+    const transport = kind === "whatsapp" ? whatsapp(join(DATA_DIR, "wa-auth"), phoneKey(process.env.WA_BOT_PHONE!)) : imessage();
+    useTransport(transport);
     const ctx = { config, db, client: claude() };
     let queue = Promise.resolve(); // one message at a time keeps per-guest history consistent
-    await connect(join(DATA_DIR, "wa-auth"), phoneKey(process.env.WA_BOT_PHONE!), (msg) => {
+    await transport.start((msg) => {
       queue = queue
         .then(() => {
           try {
@@ -65,7 +75,8 @@ switch (cmd) {
 
   default:
     console.log(`Usage: npm run hc -- <command>
-  serve                       link the bot's WhatsApp number and start answering
+  serve                       start answering texts (TRANSPORT=messages, the default, or whatsapp)
+  check                       check the Mac can read and send Messages
   status                      who's coming, who's bringing what, open questions
   ovens                       which dishes go in which oven, in time order
   simulate <name|host> "msg"  run a message through the agent without sending (DRY_RUN)

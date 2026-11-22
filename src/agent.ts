@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { type Config, type Dish, type Person, phoneKey, saveDish, removeDish, findDish, titleCase } from "./config.ts";
 import { type Db, logMessage, logChange } from "./db.ts";
 import { LIMITS, WRITE_TOOLS, clip, leaksPhone, recentMessages, screenMessage } from "./guard.ts";
-import { type Inbound, sendText, postToGroup, pause } from "./whatsapp.ts";
+import { type Inbound, sendText, postToGroup, hasGroup, pause } from "./transport.ts";
 
 const MODEL = "claude-opus-5-5";
 export type Ctx = { config: Config; db: Db; client: Anthropic };
@@ -440,8 +440,13 @@ async function handleHost(ctx: Ctx, text: string) {
   const ann = text.trim().match(/^announce\s+([\s\S]+)$/i);
   if (ann) {
     const { persona } = config;
+    const body = `${persona.emoji ?? ""} ${ann[1]}\n${persona.signoff ?? ""}`.trim();
+    const group = process.env.GROUP_NAME ?? process.env.WA_GROUP_NAME;
+    // without a group chat, everyone with a phone gets it as their own text
+    if (!hasGroup(group))
+      return sendAll(ctx, config.people.filter((p) => p.phone).map((p) => ({ phone: p.phone, name: p.name, text: body })), "Announcement: ");
     try {
-      await postToGroup(db, process.env.WA_GROUP_NAME ?? "", `${persona.emoji ?? ""} ${ann[1]}\n${persona.signoff ?? ""}`.trim());
+      await postToGroup(db, group!, body);
       return sendText(db, host, "Posted to the group.");
     } catch (err) {
       return sendText(db, host, `Couldn't post: ${(err as Error).message}`);
@@ -662,7 +667,7 @@ export async function handleInbound(ctx: Ctx, msg: Inbound) {
   if (!logMessage(db, from, "in", msg.text, msg.waId)) return; // duplicate delivery
   if (from === config.host.phone) return handleHost(ctx, msg.text);
   const guest = config.people.find((p) => p.phone === from);
-  if (!guest) return sendText(db, config.host.phone, `Message from unknown number +${from}: ${msg.text}`);
+  if (!guest) return sendText(db, config.host.phone, `Message from unknown ${from ? `number +${from}` : msg.from}: ${msg.text}`);
   try {
     const sent = recentMessages(db, from);
     if (sent > LIMITS.messagesPerHour) {
