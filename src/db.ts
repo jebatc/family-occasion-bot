@@ -17,15 +17,17 @@ export function openDb(path: string): Db {
   // Databases created before dish proposals lack the column
   if (!db.prepare("SELECT 1 FROM pragma_table_info('escalations') WHERE name = 'dish'").get()) db.exec("ALTER TABLE escalations ADD COLUMN dish TEXT");
   if (!db.prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'hash'").get()) db.exec("ALTER TABLE messages ADD COLUMN hash TEXT");
-  // incoming texts are never kept; this clears any an older version stored
-  db.exec("UPDATE messages SET body = '' WHERE direction = 'in' AND body != ''");
   return db;
 }
 
-/** Clears stored words the bot no longer needs: texts to the host, and answered questions. */
+/** Clears stored words of texts to the host (they can quote messages triage turned away). */
 export function scrubStoredText(db: Db, hostPhone: string) {
   db.prepare("UPDATE messages SET body = '' WHERE phone IN (?, 'group') AND body != ''").run(hostPhone);
-  db.exec("UPDATE escalations SET question = '', suggested = NULL, answer = NULL WHERE status = 'done' AND question != ''");
+}
+
+/** Triage passed this message to the bot, so its words may now be kept. */
+export function keepText(db: Db, waId: string, body: string) {
+  db.prepare("UPDATE messages SET body = ? WHERE wa_id = ? AND direction = 'in'").run(body, waId);
 }
 
 /** Clears every stored word of every message and question; RSVPs and the plan are kept. */

@@ -2,7 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { type Config, type Dish, type Person, phoneKey, saveDish, removeDish, findDish, titleCase } from "./config.ts";
-import { type Db, logMessage, logChange } from "./db.ts";
+import { type Db, logMessage, logChange, keepText } from "./db.ts";
 import { LIMITS, WRITE_TOOLS, clip, leaksPhone, recentMessages, screenMessage } from "./guard.ts";
 import { type Inbound, sendText, postToGroup, hasGroup, pause, sharesHostNumber, textHash } from "./transport.ts";
 
@@ -116,15 +116,16 @@ const tools: Anthropic.Beta.BetaTool[] = [
   },
 ];
 
-function systemPrompt({ config }: Ctx) {
+function systemPrompt({ config, db }: Ctx) {
   const { persona, host, event } = config;
+  const answered = db.prepare("SELECT question, answer FROM escalations WHERE status = 'done' AND question != ''").all();
   return `You are ${persona.name}, ${host.name}'s assistant for ${event.title}. Tone: ${persona.tone}. Sign off as: ${persona.signoff}
 
 You're chatting 1:1 by text with a family member. Keep replies short, like a text message.${sharesHostNumber() ? `
 You're texting from ${host.name}'s own phone number, so this person also texts ${host.name} about everything else in life. Only handle the gathering. If the newest message isn't about the gathering or your conversation with them, don't reply at all.` : ""}
 
 Rules:
-- Answer only from the event details, plan and schedule below. If the answer isn't there or you're unsure, call escalate and tell the guest you're checking with ${host.name}.
+- Answer only from the event details, plan, schedule and host answers below. If the answer isn't there or you're unsure, call escalate and tell the guest you're checking with ${host.name}.
 - A yes RSVP means their whole household is coming; don't ask how many. If they want to bring anyone beyond their household (a friend, a date, extra guests), escalate it to ${host.name}.
 - Escalate anything that would change the plan: guests beyond their own household, swapping or dropping dishes, dietary conflicts, money, logistics, or anything sensitive.
 - Recording the guest's own RSVP, or their yes/no on a dish they were asked to bring, needs no escalation.
@@ -144,7 +145,10 @@ ${config.plan || "(none yet)"}
 </plan>
 <schedule>
 ${config.schedule || "(none yet)"}
-</schedule>`;
+</schedule>
+<host_answers>
+${answered.map((r) => `Q: ${r.question}\nA: ${r.answer}`).join("\n\n") || "(none yet)"}
+</host_answers>`;
 }
 
 // shortcut: "Sam" matches "Sam Rivera"; use full names in event.yaml if two people share a first name
@@ -209,14 +213,14 @@ function householdRsvp(db: Db, members: Person[]) {
     .get(...members.map((m) => m.phone));
 }
 
-/** Guests' texts are never stored, so the conversation is the bot's own recent texts plus the new message. */
-function guestContext({ config, db }: Ctx, guest: Person, text: string) {
+/** The conversation: texts triage passed to the bot and the bot's own replies (nothing else is kept), then the new message. */
+function guestContext({ config, db }: Ctx, guest: Person, text: string, waId: string) {
   const mine = config.menu.filter((d) => owns(d, guest));
   const members = households(config).get(guest.household)!;
   const rsvp = householdRsvp(db, members);
   const history = db
-    .prepare("SELECT body FROM messages WHERE phone = ? AND direction = 'out' AND wa_id IS NULL AND body != '' ORDER BY id DESC LIMIT 10")
-    .all(guest.phone)
+    .prepare("SELECT direction, body FROM messages WHERE phone = ? AND body != '' AND wa_id IS NOT ? ORDER BY id DESC LIMIT 20")
+    .all(guest.phone, waId)
     .reverse();
   return `Guest: ${guest.name}
 Household: ${guest.household} (${members.map((m) => m.name).join(", ")}); an RSVP from any of them counts for the household
@@ -224,8 +228,8 @@ Dietary: ${guest.dietary ?? "none noted"}
 Your dishes and day-of tasks: ${mine.map((d) => `${detailed(d)} (${d.course === "task" ? "task, " : ""}${d.status ?? "proposed"}${d.fallback ? `; falls back to ${d.fallback} if they can't` : ""})`).join("; ") || "none"}
 Household RSVP: ${guest.household === config.host.household ? `hosting (lives with ${config.host.name}; don't ask them to RSVP)` : rsvp ? JSON.stringify(rsvp) : "not yet"}
 
-Your recent texts to them (oldest first; their replies aren't kept):
-${history.map((m) => `You: ${m.body}`).join("\n") || "(none)"}
+Conversation so far (oldest first; only texts about the gathering are kept):
+${history.map((m) => `${m.direction === "in" ? guest.name : "You"}: ${m.body}`).join("\n") || "(none)"}
 
 Their new message, the one to answer:
 ${guest.name}: ${text}`;
@@ -340,10 +344,10 @@ async function runTool(ctx: Ctx, guest: Person, name: string, input: any) {
 }
 
 /** Runs Claude on the guest's latest message; returns true if they RSVP'd yes this turn. */
-async function runGuestAgent(ctx: Ctx, guest: Person, text: string) {
+async function runGuestAgent(ctx: Ctx, guest: Person, text: string, waId: string) {
   let saidYes = false;
   let writes = 0;
-  const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: "user", content: guestContext(ctx, guest, text) }];
+  const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: "user", content: guestContext(ctx, guest, text, waId) }];
   const system = systemPrompt(ctx);
   for (let turn = 0; turn < 6; turn++) {
     const res = await ctx.client.beta.messages.create({
@@ -405,8 +409,7 @@ async function handleHost(ctx: Ctx, text: string) {
     const question = needs.length ? `\n\nOne quick question: is it ${needs.join(" and ")}? ${who.join(" and ")} ${who.length === 1 ? "needs" : "need"} that.` : "";
     await sendText(db, esc.phone as string, answer + question);
     // a dish proposal stays open until it's settled with ok or no
-    // settled questions keep no words: the guest has their answer, and the plan holds anything that changed
-    if (!esc.dish || ok || no) db.prepare("UPDATE escalations SET question = '', suggested = NULL, answer = NULL, status = 'done' WHERE id = ?").run(esc.id);
+    if (!esc.dish || ok || no) db.prepare("UPDATE escalations SET answer = ?, status = 'done' WHERE id = ?").run(answer, esc.id);
     if (esc.dish && ok) saveDish(config.eventFile, esc.dish as string, { status: "confirmed" });
     if (esc.dish && no) removeDish(config.eventFile, esc.dish as string);
     const outcome = esc.dish ? (ok ? ` ${esc.dish} is on the menu.` : no ? ` ${esc.dish} is off the menu.` : ` ${esc.dish} is still waiting on you: reply "#${esc.id} ok" or "#${esc.id} no" to settle it.`) : "";
@@ -691,8 +694,8 @@ const openThread = (db: Db, phone: string, now = Date.now()) =>
   !!db.prepare("SELECT 1 FROM messages WHERE phone = ? AND direction = 'out' AND wa_id IS NULL AND ts > ?").get(phone, now - OPEN_THREAD_MS);
 
 /**
- * Handles one text. Its words are used only while it's handled, and never stored: the database keeps that a message
- * arrived, and whatever it changed (an RSVP, a dish, a question for the host).
+ * Handles one text. Triage (the checks and the screening model) is stateless: a text it turns away leaves only the
+ * fact that a message arrived, never its words. A text it passes to the bot is kept, as part of the conversation.
  */
 export async function handleInbound(ctx: Ctx, msg: Inbound) {
   const { config, db } = ctx;
@@ -721,23 +724,24 @@ export async function handleInbound(ctx: Ctx, msg: Inbound) {
       return;
     }
     // only relevant messages reach the agent and its tools
-    const mineSoFar = db.prepare("SELECT body FROM messages WHERE phone = ? AND direction = 'out' AND wa_id IS NULL AND body != '' ORDER BY id DESC LIMIT 5").all(from).reverse();
-    const history = [...mineSoFar.map((r) => ({ direction: "out", body: String(r.body) })), { direction: "in", body: msg.text }];
+    const kept = db.prepare("SELECT direction, body FROM messages WHERE phone = ? AND body != '' ORDER BY id DESC LIMIT 5").all(from).reverse();
+    const history = [...kept.map((r) => ({ direction: String(r.direction), body: String(r.body) })), { direction: "in", body: msg.text }];
     const { verdict, reason } = await screenMessage(ctx.client, guest, history, shared ? config.host.name : undefined);
     if (verdict === "off_topic" && shared) return; // everyday texts to the host: not the bot's to answer
-    if (verdict === "off_topic") return sendText(db, from, `I'm ${config.persona.name}, ${config.host.name}'s Thanksgiving helper, so I can only help with Thanksgiving plans. ${config.persona.signoff ?? ""}`.trim());
+    if (verdict === "off_topic") return sendText(db, from, `I'm ${config.persona.name}, ${config.host.name}'s Thanksgiving helper, so I can only help with Thanksgiving plans. ${config.persona.signoff ?? ""}`.trim(), false); // triage output: not kept
     if (verdict === "suspicious") {
       logChange(db, from, "held_message", ""); // that a message was held, not what it said
       return tellHost(db, config.host.phone, `⚠️ Held a message from ${guest.name} without replying (${clip(reason, 150)})${shared ? ". It's in your thread with them." : `:\n"${clip(msg.text)}"`}\nIf it needs an answer: tell ${guest.name.split(" ")[0]}: <your message>`);
     }
     // event-driven: a yes gets the bot's confirmation reply first, then that household's dish requests
+    keepText(db, msg.waId, msg.text); // passed triage: now part of the conversation with the bot
     // the host is mid-conversation with them: record what they say, but leave the replying to the host
     if (shared && hostTalking(db, from)) {
-      if (await runGuestAgent({ ...ctx, quiet: true }, guest, msg.text))
+      if (await runGuestAgent({ ...ctx, quiet: true }, guest, msg.text, msg.waId))
         await tellHost(db, config.host.phone, `${guest.name} said yes while you were texting them, so I've recorded it. Text "request ${guest.name.split(" ")[0]}" when you'd like me to send their dish requests.`);
       return;
     }
-    if (await runGuestAgent(ctx, guest, msg.text)) await followUpRequests(ctx, guest);
+    if (await runGuestAgent(ctx, guest, msg.text, msg.waId)) await followUpRequests(ctx, guest);
   } catch (err) {
     console.error(`agent failed for ${guest.name}`, err);
     await tellHost(db, config.host.phone, `⚠️ I hit an error answering ${guest.name}${quote()}. Please reply to them directly.`);

@@ -29,7 +29,7 @@ Judge only the newest message, using the recent conversation for context. Short 
 // On the host's own number the default flips: only clearly gathering-related messages get the assistant
 const sharedNumberNote = (host: string) => `
 
-The assistant texts from ${host}'s own phone number, so ${host} gets everyday personal texts from these same people. Only the assistant's own messages are shown; ${host}'s personal ones are not. Here:
+The assistant texts from ${host}'s own phone number, so ${host} gets everyday personal texts from these same people. ${host}'s own personal messages are never shown. Here:
 - relevant means the newest message is about the gathering, or clearly answers something the Assistant asked.
 - off_topic includes everything else, including personal chat, and greetings, thanks or emoji that aren't replying to the Assistant.
 When unsure, choose off_topic: ${host} will see the message on their own phone either way.`;

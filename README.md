@@ -113,10 +113,11 @@ Family members can't make the bot run code or change things they shouldn't:
 
 ## Privacy
 
-The assistant uses a text's words only while it handles that text, then lets them go:
+Every text goes through triage first: the checks on who sent it, then a screening model that decides whether it's about the occasion. **Triage keeps nothing.** A text it turns away (off-topic, suspicious, from someone the assistant isn't talking with, or one screening couldn't judge) leaves only the fact that a message arrived, never its words.
 
-- **Incoming texts are never stored.** The database records that a text arrived and when, plus whatever it led to: an RSVP, a dish confirmed, an oven temperature, a question for you. A question's wording is cleared as soon as you answer it.
-- **What's kept is the assistant's own texts to guests,** so it knows what it asked them. Texts to you (which often quote guests) are stored only as a fingerprint, so it can recognize its own messages. Two days after the event, every stored word is cleared automatically. Run `npm run hc -- forget` to clear them at any time.
+- **Texts passed to the assistant are kept** as the conversation, along with its replies, so it can follow a back-and-forth. Your answers to its questions are kept too, so it can reuse them for other guests.
+- **Texts to you** (which can quote texts triage turned away) are stored only as a fingerprint, so the assistant can recognize its own messages.
+- **Clearing it:** two days after the event, every stored word is cleared automatically. Run `npm run hc -- forget` to clear them at any time. RSVPs, dishes and the plan are kept.
 - **Claude.** Each text the assistant handles is sent to Anthropic's API to be screened and answered. Anthropic doesn't train models on API data without your permission, and deletes API inputs and outputs within 30 days. Zero data retention (nothing stored once the response returns) is available from Anthropic on request, and covers the models this uses.
 - **Not controlled by the assistant:** your Mac's Messages history and iCloud keep every text as they always do, and your family's phones keep their side of the conversation.
 
