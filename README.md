@@ -196,7 +196,7 @@ While it runs, Tom writes `private/dashboard.json` every 5 minutes: RSVPs, dishe
 
 A dashboard on claude.ai ("Tom's Thanksgiving Desk") shows that file once it's uploaded. Claude on your Mac can upload it when you ask ("refresh Tom's dashboard"), or as a scheduled task in the Claude desktop app with this prompt:
 
-> In the family-occasion-bot folder, run `npm run hc -- snapshot`. Upload `private/dashboard.json` as an asset to the dashboard https://claude.ai/artifact/MQTN8U9UEGWVmVTBMub4AP. Update the datasets meta, households, dishes, messages and followups so their `source.url` is the new file and `updated` is now, and give them titles without "Sample". Then delete the file they used before.
+> In the family-occasion-bot folder, run `npm run hc -- snapshot`. Upload `private/dashboard.json` as an asset to the dashboard https://claude.ai/artifact/MQTN8U9UEGWVmVTBMub4AP. Update the datasets meta, households, dishes, messages, followups and planned so their `source.url` is the new file and `updated` is now, and give them titles without "Sample". Then delete the file they used before.
 
 Everyone who can open the dashboard can read the whole file, texts included. It's private to you unless you share it.
 
