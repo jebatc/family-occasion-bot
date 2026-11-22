@@ -712,3 +712,82 @@ export async function handleReferral(ctx: Ctx, r: Referral) {
     await tellHost(db, config.host.phone, `⚠️ I hit an error answering ${guest.name}${sharesHostNumber() ? "" : `: "${r.text}"`}. Please reply to them directly.`);
   }
 }
+
+/**
+ * Everything the dashboard shows, as plain rows: households, dishes, recent messages, and what's waiting on whom.
+ * People appear by name only; phone numbers never leave the Mac.
+ */
+export function snapshotData({ config, db }: Ctx, now = new Date()) {
+  const iso = (ts: unknown) => (ts ? new Date(Number(ts)).toISOString() : null);
+  const byPhone = new Map([[config.host.phone, `${config.host.name} (you)`], ...config.people.map((p) => [p.phone, p.name] as [string, string])]);
+  const who = (phone: unknown) => (phone === "group" ? "Family group" : byPhone.get(String(phone)) ?? "Someone not in family.yaml");
+  const last = (phone: string, direction: "in" | "out") =>
+    db.prepare("SELECT MAX(ts) AS ts FROM messages WHERE phone = ? AND direction = ?").get(phone, direction)?.ts;
+  const pending = awaitingHost(db);
+  const statusOf = (d: Dish) => (pending.has(d.dish.toLowerCase()) ? "offered" : d.status ?? "proposed");
+
+  const households_ = [...households(config)].map(([name, members]) => {
+    const isHost = name === config.host.household;
+    const r = isHost ? { status: "hosting", headcount: null } : householdRsvp(db, members);
+    const phones = members.filter((m) => m.phone).map((m) => m.phone);
+    const invited = phones.some((ph) => db.prepare("SELECT 1 FROM messages WHERE phone = ? AND direction = 'out' AND body LIKE '%Will you be joining?%'").get(ph));
+    const heard = phones.map((ph) => Number(last(ph, "in") ?? 0)).reduce((a, b) => Math.max(a, b), 0);
+    const status = isHost ? "hosting" : r?.status ? String(r.status) : invited ? "waiting" : "not invited";
+    return {
+      household: name,
+      members: members.map((m) => m.name).join(", "),
+      status,
+      people: status === "hosting" || status === "yes" ? (Number(r?.headcount) || members.length) : 0,
+      note: r?.note ? String(r.note) : "",
+      last_heard: iso(heard),
+    };
+  });
+
+  const dishes = config.menu.map((d) => ({
+    dish: d.dish,
+    course: d.course === "task" ? "Day-of task" : d.course ? d.course[0].toUpperCase() + d.course.slice(1) : "",
+    owner: ownerNames(d).join(", ") || "Needs an owner",
+    status: ownerNames(d).length ? statusOf(d) : "needs owner",
+    oven: d.oven ? `${d.oven.name}${d.oven.when ? ` ${d.oven.when}` : ""}${d.oven.temp ? ` · ${d.oven.temp}` : " · temp needed"}` : "",
+  }));
+
+  const messages = db.prepare("SELECT id, phone, direction, body, ts FROM messages WHERE body != '' ORDER BY id DESC LIMIT 150").all().reverse()
+    .map((m) => ({ id: Number(m.id), at: iso(m.ts), person: who(m.phone), direction: m.direction === "in" ? "from them" : "from Tom", text: String(m.body) }));
+
+  // what's waiting on the host, and what Tom is chasing
+  const followups: Record<string, unknown>[] = [];
+  for (const e of db.prepare("SELECT id, phone, question, dish, ts FROM escalations WHERE status = 'open' ORDER BY id").all())
+    followups.push({ for: "You", kind: e.dish ? "Approve a dish" : "Answer a question", person: who(e.phone), detail: String(e.question), reply: `#${e.id} ok`, since: iso(e.ts), next: null });
+  for (const d of config.menu.filter((d) => !ownerNames(d).length))
+    followups.push({ for: "You", kind: "Find an owner", person: "", detail: d.dish + (d.declined_by ? ` (${d.declined_by} declined)` : ""), reply: "", since: null, next: null });
+  for (const d of config.menu.filter((d) => needsTemp(d) && owns(d, config.host)))
+    followups.push({ for: "You", kind: "Set an oven temp", person: "", detail: d.dish, reply: `temp ${d.dish} <°F>`, since: null, next: null });
+  const nextNudge = (phone: string) => {
+    const lastAny = Number(db.prepare("SELECT MAX(ts) AS ts FROM messages WHERE phone = ?").get(phone)?.ts ?? 0);
+    const t = new Date(Math.max(lastAny + DAY, +now));
+    if (t.getHours() < 10) t.setHours(10, 0, 0, 0);
+    if (t.getHours() >= 19) (t.setDate(t.getDate() + 1), t.setHours(10, 0, 0, 0));
+    const day = eventDay(config);
+    return day && +t > +day + DAY ? null : t.toISOString();
+  };
+  for (const h of households_.filter((h) => h.status === "waiting")) {
+    const members = households(config).get(h.household)!.filter((m) => m.phone);
+    followups.push({ for: "Tom", kind: "Waiting on an RSVP", person: h.household, detail: "Invited; no answer yet", reply: "", since: iso(last(members[0].phone, "out")), next: nextNudge(members[0].phone) });
+  }
+  for (const p of config.people.filter((p) => p.phone)) {
+    const waiting = config.menu.filter((d) => owns(d, p) && d.status === "requested");
+    if (waiting.length) followups.push({ for: "Tom", kind: "Waiting on a dish", person: p.name, detail: waiting.map((d) => d.dish).join(", "), reply: "", since: iso(last(p.phone, "out")), next: nextNudge(p.phone) });
+  }
+  for (const d of config.menu.filter((d) => needsTemp(d) && d.status === "confirmed" && !owns(d, config.host)))
+    followups.push({ for: "Tom", kind: "Needs an oven temp", person: ownerNames(d).join(", "), detail: d.dish, reply: "temps", since: null, next: null });
+  for (const h of households_.filter((h) => h.status === "not invited"))
+    followups.push({ for: "You", kind: "Not invited yet", person: h.household, detail: "Text \"rsvp\" to invite everyone who hasn't been", reply: "rsvp", since: null, next: null });
+
+  return {
+    meta: [{ title: config.event.title, date: String(config.event.date), generated_at: now.toISOString(), assistant: config.persona.name, host: config.host.name }],
+    households: households_,
+    dishes,
+    messages,
+    followups: followups.map((f, i) => ({ id: i + 1, ...f })),
+  };
+}

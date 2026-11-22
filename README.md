@@ -190,6 +190,16 @@ npm run bot:install
 
 A MacBook still sleeps when its lid closes. To run it lid-closed while plugged in, `sudo pmset -a disablesleep 1` keeps it awake. Turn that off again with `0` after the occasion. An always-on machine such as a Raspberry Pi also works, but the Messages mode needs a Mac.
 
+### Watching Tom on a dashboard
+
+While it runs, Tom writes `private/dashboard.json` every 5 minutes: RSVPs, dishes, the texts he handled, what's waiting on you and what he's following up. `npm run hc -- snapshot` writes it on demand. It names people but never includes phone numbers.
+
+A dashboard on claude.ai ("Tom's Thanksgiving Desk") shows that file once it's uploaded. Claude on your Mac can upload it when you ask ("refresh Tom's dashboard"), or as a scheduled task in the Claude desktop app with this prompt:
+
+> In the family-occasion-bot folder, run `npm run hc -- snapshot`. Upload `private/dashboard.json` as an asset to the dashboard https://claude.ai/artifact/MQTN8U9UEGWVmVTBMub4AP. Update the datasets meta, households, dishes, messages and followups so their `source.url` is the new file and `updated` is now, and give them titles without "Sample". Then delete the file they used before.
+
+Everyone who can open the dashboard can read the whole file, texts included. It's private to you unless you share it.
+
 ## What it costs
 
 - **AI:** each message the bot answers is a short Claude conversation plus a quick screening check, so a few cents at most. A whole holiday's back-and-forth with a family is typically a few dollars.

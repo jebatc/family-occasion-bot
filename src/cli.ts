@@ -3,7 +3,7 @@ import { join } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import { DATA_DIR, loadConfig, phoneKey } from "./config.ts";
 import { openDb, lastMessageTs } from "./db.ts";
-import { ovensText, sendReminders, statusText, tom } from "./agent.ts";
+import { ovensText, sendReminders, statusText, tom, snapshotData } from "./agent.ts";
 import { triage } from "./triage.ts";
 import { useTransport, sharesHostNumber } from "./transport.ts";
 import { whatsapp } from "./whatsapp.ts";
@@ -14,6 +14,9 @@ const [cmd, ...args] = process.argv.slice(2);
 const claude = () => new Anthropic(process.env.ANTHROPIC_WORKSPACE_ID ? { defaultHeaders: { "anthropic-workspace-id": process.env.ANTHROPIC_WORKSPACE_ID } } : {});
 const config = loadConfig();
 const db = openDb(join(config.eventDir, "state.db"));
+// what the dashboard shows; rewritten while the bot runs
+const SNAPSHOT = join(DATA_DIR, "dashboard.json");
+const writeSnapshot = (path = SNAPSHOT) => writeFileSync(path, JSON.stringify(snapshotData({ config: loadConfig(), db, client: null as never }), null, 1));
 
 switch (cmd) {
   case "status":
@@ -40,6 +43,11 @@ switch (cmd) {
     }
     break;
   }
+
+  case "snapshot":
+    writeSnapshot(args[0]);
+    console.log(`Wrote ${args[0] ?? SNAPSHOT}`);
+    break;
 
   case "check":
     console.log(await checkMessages());
@@ -74,6 +82,8 @@ switch (cmd) {
         })
         .catch((err) => console.error("inbound failed", err));
     }, lastMessageTs(db) ?? Date.now()); // catch up on anything newer than the last message the bot handled
+    writeSnapshot();
+    setInterval(() => { try { writeSnapshot(); } catch (err) { console.error("snapshot failed", (err as Error).message); } }, 5 * 60_000);
     // daily nudges for missing RSVPs and unconfirmed dishes; checked every 30 minutes, queued with incoming messages
     setInterval(() => {
       queue = queue
@@ -87,6 +97,7 @@ switch (cmd) {
     console.log(`Usage: npm run hc -- <command>
   serve                       start answering texts (TRANSPORT=messages, the default, or whatsapp)
   check                       check the Mac can read and send Messages
+  snapshot [file]             write what the dashboard shows (private/dashboard.json; serve does this every 5 minutes)
   status                      who's coming, who's bringing what, open questions
   ovens                       which dishes go in which oven, in time order
   simulate <name|host> "msg"  run a message through the agent without sending (DRY_RUN)
