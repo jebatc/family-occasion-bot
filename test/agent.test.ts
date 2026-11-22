@@ -758,6 +758,8 @@ test("every text Tom sends records why, and the dashboard lists what he plans to
   ]);
   await handleInbound({ config, db, client }, { waId: "w2", from: SUE, text: "can I bring my dog?" });
   assert.equal(why(SUE)[1], 'Reply to their text: "can I bring my dog?"');
+  assert.equal(db.prepare("SELECT why FROM messages WHERE phone = ? AND direction = 'in'").get(SUE)?.why, "Screened as about the gathering: test", "the inbox says why triage referred it");
+  assert.equal(db.prepare("SELECT why FROM messages WHERE phone = ? AND direction = 'in'").get(HOST)?.why, "Your command, from your chat with yourself");
 
   // a day later, with Bob still not answering
   const later = new Date(Date.now() + 25 * 3600_000);

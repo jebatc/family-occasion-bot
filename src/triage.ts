@@ -28,8 +28,8 @@ export interface Project {
   handle(r: Referral): Promise<void>;
 }
 
-/** fromHost: a command from the host. */
-export type Referral = { waId: string; from: string; text: string; ts?: number; fromHost?: boolean };
+/** fromHost: a command from the host. why: triage's reason for referring it. */
+export type Referral = { waId: string; from: string; text: string; ts?: number; fromHost?: boolean; why?: string };
 
 /** Kept in memory only, for as long as the process runs. */
 export type TriageState = { seen: Set<string>; recent: Map<string, number[]> };
@@ -60,7 +60,7 @@ export function triage(opts: { project: Project; client: Anthropic; shared: bool
     if (from === host) {
       // the project's replies to the host land in the host's chat with themselves; skip them
       if (shared && project.sent(host, textHash(msg.text))) return;
-      return project.handle({ waId: msg.waId, from, text: msg.text, ts: msg.ts, fromHost: true });
+      return project.handle({ waId: msg.waId, from, text: msg.text, ts: msg.ts, fromHost: true, why: "Your command, from your chat with yourself" });
     }
 
     const person = project.person(from);
@@ -92,6 +92,6 @@ export function triage(opts: { project: Project; client: Anthropic; shared: bool
     if (verdict === "suspicious")
       return tellHost(`⚠️ Held a message from ${person.name} without replying (${clip(reason, 150)})${shared ? ". It's in your thread with them." : `:\n"${clip(msg.text)}"`}\nIf it needs an answer: tell ${person.name.split(" ")[0]}: <your message>`);
 
-    return project.handle({ waId: msg.waId, from, text: msg.text, ts: msg.ts });
+    return project.handle({ waId: msg.waId, from, text: msg.text, ts: msg.ts, why: `Screened as about the gathering: ${clip(reason, 200)}` });
   };
 }

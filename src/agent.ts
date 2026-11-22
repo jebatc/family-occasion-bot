@@ -713,7 +713,7 @@ export function tom(ctx: Ctx): Project {
 /** A text triage referred to Tom: a host command, or a guest's text about the gathering. */
 export async function handleReferral(ctx: Ctx, r: Referral) {
   const { config, db } = ctx;
-  if (!logMessage(db, r.from, "in", r.text, r.waId)) return; // already handled
+  if (!logMessage(db, r.from, "in", r.text, r.waId, undefined, r.why)) return; // already handled
   if (r.fromHost) return handleHost(ctx, r.text);
   const guest = config.people.find((p) => p.phone === r.from);
   if (!guest) return;
@@ -769,7 +769,8 @@ export function snapshotData(ctx: Ctx, now = new Date()) {
   const messages = db.prepare("SELECT id, phone, direction, body, ts, why FROM messages WHERE body != '' ORDER BY id DESC LIMIT 150").all().reverse()
     .map((m) => ({
       id: Number(m.id), at: iso(m.ts), person: who(m.phone), direction: m.direction === "in" ? "from them" : "from Tom",
-      to_host: m.phone === config.host.phone, text: String(m.body), why: m.why ? String(m.why) : m.direction === "out" ? "Sent before Tom recorded reasons" : "",
+      to_host: m.phone === config.host.phone, text: String(m.body),
+      why: m.why ? String(m.why) : m.direction === "out" ? "Sent before Tom recorded reasons" : "Referred before Tom recorded reasons",
     }));
 
   // what's waiting on the host, and what Tom is chasing
