@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
-  msToAppleDate, textFromAttributedBody, rowToInbound, newMessages, serviceFor, sendFailed, imessage,
+  msToAppleDate, textFromAttributedBody, rowToInbound, newMessages, serviceFor, sendFailed, imessage, inboundFilter,
 } from "../src/imessage.ts";
 import type { Inbound } from "../src/transport.ts";
 
@@ -69,7 +69,9 @@ test("only incoming one-to-one texts become messages", () => {
   addMessage({ handle: 1, tapback: true, text: "Loved “Gobble gobble”" });
   addMessage({ handle: 3, chat: 4, text: "from an Apple ID email" });
   addMessage({ handle: 1, text: "￼" }); // a photo with no words
-  const got = newMessages(chat, 0).map(rowToInbound).filter(Boolean) as Inbound[];
+  const all = newMessages(chat, 0).map(rowToInbound).filter(Boolean) as Inbound[];
+  assert.deepEqual(all.filter((m) => m.mine).map((m) => m.text), ["Gobble gobble"], "sent texts are marked mine");
+  const got = all.filter((m) => !m.mine);
   assert.deepEqual(got.map((m) => [m.from, m.text]), [
     ["15550000001", "Yes we're coming"],
     ["15550000002", "Can I bring Dana?"],
@@ -116,4 +118,32 @@ test("a delivered iMessage isn't resent", () => {
   assert.equal(sendFailed(chat, "+15550000001", before), false);
   addMessage({ handle: 1, fromMe: true, text: "later one failed", error: 22 });
   assert.equal(sendFailed(chat, "+15550000001", before), false, "only the message just sent counts");
+});
+
+const HOST = "15550000000";
+const msg = (from: string, text: string, extra: Partial<Inbound> = {}): Inbound => ({ waId: `g-${Math.random()}`, from, text, ts: Date.now(), ...extra });
+
+test("on its own Apple ID, the bot ignores everything it sent", () => {
+  const { accept } = inboundFilter({});
+  assert.equal(accept(msg("15550000001", "hi", { mine: true })), undefined);
+  assert.equal(accept(msg("15550000001", "hi"))?.text, "hi");
+});
+
+test("texting as you: your texts to yourself are commands, acted on once", () => {
+  const { accept } = inboundFilter({ host: HOST, selfHandles: ["Me@Example.com"] });
+  const cmd = accept(msg(HOST, "status", { mine: true }));
+  assert.deepEqual([cmd?.from, cmd?.text, cmd?.mine], [HOST, "status", undefined]);
+  assert.equal(accept(msg(HOST, "status")), undefined, "the received copy of a text to yourself");
+  assert.equal(accept(msg("me@example.com", "rsvp", { mine: true }))?.from, HOST, "self-chat on your Apple ID email");
+});
+
+test("texting as you: the bot's own texts aren't mistaken for yours", () => {
+  const { accept, remember } = inboundFilter({ host: HOST });
+  remember("+15550000001", "Gobble gobble! — Tom 🦃");
+  remember(`+${HOST}`, "Sent to Aunt Sue.");
+  assert.equal(accept(msg("15550000001", "Gobble gobble! — Tom 🦃", { mine: true })), undefined);
+  assert.equal(accept(msg(HOST, "Sent to Aunt Sue.", { mine: true })), undefined);
+  assert.equal(accept(msg(HOST, "Sent to Aunt Sue.")), undefined);
+  assert.equal(accept(msg("15550000001", "See you Thursday!", { mine: true }))?.mine, true, "what you typed yourself");
+  assert.equal(accept(msg("15550000001", "Can't wait"))?.text, "Can't wait");
 });

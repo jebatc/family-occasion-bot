@@ -18,7 +18,7 @@ export type Verdict = { verdict: "relevant" | "off_topic" | "suspicious"; reason
 
 const SCREEN_MODEL = "claude-haiku-5-5";
 
-const SCREEN_PROMPT = `You screen WhatsApp messages sent to a family's Thanksgiving planning assistant before it answers them. Classify the newest guest message.
+const SCREEN_PROMPT = `You screen text messages sent to a family's Thanksgiving planning assistant before it answers them. Classify the newest guest message.
 
 - relevant: anything about the family's Thanksgiving gathering or the conversation with the assistant: RSVPs, who's coming, dishes, recipes, ingredients, dietary needs, timing, the address, Hot Dog Night, offering to bring something, questions for the host, greetings, thanks, short replies like "yes", "ok", "hi", emoji.
 - off_topic: unrelated requests the assistant shouldn't spend time on: homework, coding, trivia, news, other events, general chatbot use.
@@ -26,9 +26,18 @@ const SCREEN_PROMPT = `You screen WhatsApp messages sent to a family's Thanksgiv
 
 Judge only the newest message, using the recent conversation for context. Short or casual replies to the assistant's own questions are relevant. When unsure between relevant and off_topic, choose relevant.`;
 
+// On the host's own number the default flips: only clearly gathering-related messages get the assistant
+const sharedNumberNote = (host: string) => `
+
+The assistant texts from ${host}'s own phone number, so ${host} gets everyday personal texts from these same people. Lines from ${host} were typed by ${host} personally. Here:
+- relevant means the newest message is about the gathering, or clearly answers something the Assistant asked.
+- off_topic includes everything else, including personal chat, greetings, thanks or emoji that aren't replying to the Assistant, and anything in a conversation ${host} is carrying on personally.
+When unsure, choose off_topic: ${host} will see the message on their own phone either way.`;
+
 /** Asks a small model whether the guest's newest message should be answered. Throws on API errors: the caller holds the message. */
-export async function screenMessage(client: Anthropic, guest: Person, history: { direction: string; body: string }[]): Promise<Verdict> {
-  const transcript = history.map((m) => `${m.direction === "in" ? guest.name : "Assistant"}: ${clip(m.body, 500)}`).join("\n");
+/** hostName: set when the assistant texts from the host's own number, so most of what arrives is ordinary personal texting. */
+export async function screenMessage(client: Anthropic, guest: Person, history: { direction: string; body: string; by_host?: unknown }[], hostName?: string): Promise<Verdict> {
+  const transcript = history.map((m) => `${m.direction === "in" ? guest.name : m.by_host ? hostName : "Assistant"}: ${clip(m.body, 500)}`).join("\n");
   const res = await client.messages.create({
     model: SCREEN_MODEL,
     max_tokens: 1000,
@@ -47,7 +56,7 @@ export async function screenMessage(client: Anthropic, guest: Person, history: {
         },
       },
     },
-    system: SCREEN_PROMPT,
+    system: hostName ? SCREEN_PROMPT + sharedNumberNote(hostName) : SCREEN_PROMPT,
     messages: [{ role: "user", content: `<conversation>\n${transcript}\n</conversation>\nClassify the newest message from ${guest.name}.` }],
   } as Parameters<Anthropic["messages"]["create"]>[0]);
   if (res.stop_reason === "refusal") return { verdict: "suspicious", reason: "the screening model declined to read it" };

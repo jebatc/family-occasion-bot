@@ -48,7 +48,13 @@ switch (cmd) {
     if (!["messages", "whatsapp"].includes(kind)) throw new Error(`TRANSPORT must be "messages" or "whatsapp", not "${kind}"`);
     const missing = ["ANTHROPIC_API_KEY", ...(kind === "whatsapp" ? ["WA_BOT_PHONE"] : [])].filter((k) => !process.env[k]);
     if (missing.length) throw new Error(`Set these in private/.env: ${missing.join(", ")}`);
-    const transport = kind === "whatsapp" ? whatsapp(join(DATA_DIR, "wa-auth"), phoneKey(process.env.WA_BOT_PHONE!)) : imessage();
+    // TEXT_AS=me (default): the bot texts from your own Apple ID; "assistant": it has an Apple ID of its own
+    const asMe = (process.env.TEXT_AS ?? "me").toLowerCase() !== "assistant";
+    const selfHandles = (process.env.HOST_APPLE_ID ?? "").split(",").map((h) => h.trim()).filter(Boolean);
+    const transport = kind === "whatsapp"
+      ? whatsapp(join(DATA_DIR, "wa-auth"), phoneKey(process.env.WA_BOT_PHONE!))
+      : imessage(asMe ? { host: config.host.phone, selfHandles } : {});
+    if (asMe && kind !== "whatsapp") console.log(`Texting as you. Send commands by texting yourself (+${config.host.phone}).`);
     useTransport(transport);
     const ctx = { config, db, client: claude() };
     let queue = Promise.resolve(); // one message at a time keeps per-guest history consistent

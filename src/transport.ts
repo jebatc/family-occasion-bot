@@ -1,7 +1,10 @@
 import { type Db, logMessage } from "./db.ts";
 
-/** One incoming text. id is the transport's own message id, used to skip redeliveries. */
-export type Inbound = { waId: string; from: string; text: string; ts?: number };
+/**
+ * One text. waId is the transport's own message id, used to skip redeliveries.
+ * mine: the host typed this to `from` themselves (only when the bot texts from the host's own number).
+ */
+export type Inbound = { waId: string; from: string; text: string; ts?: number; mine?: boolean };
 
 /** How the bot reaches people: WhatsApp (Baileys) or the Mac's Messages app (iMessage + SMS). */
 export interface Transport {
@@ -10,6 +13,8 @@ export interface Transport {
   send(to: string, text: string): Promise<void>;
   /** Posts to a group chat by name; transports without one throw, and announce falls back to individual texts. */
   postToGroup?(groupName: string, text: string): Promise<void>;
+  /** True when the bot texts from the host's own number, so it also sees the host's personal texts. */
+  sharesHostNumber?: boolean;
   /** Milliseconds to wait between bulk messages: [minimum, extra random] */
   spacing: [number, number];
   /** Starts delivering incoming messages. catchUpSince: when the bot last logged anything. */
@@ -17,8 +22,9 @@ export interface Transport {
 }
 
 let active: Transport | undefined;
-export const useTransport = (t: Transport) => void (active = t);
+export const useTransport = (t: Transport | undefined) => void (active = t);
 export const transportName = () => active?.name;
+export const sharesHostNumber = () => !!active?.sharesHostNumber;
 
 async function deliver(to: string, text: string, how: (t: Transport) => Promise<void>) {
   if (process.env.DRY_RUN) return console.log(`[dry-run] → ${to}: ${text}`);

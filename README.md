@@ -4,7 +4,7 @@ A texting assistant for hosting family gatherings. It sends the invitations, kee
 
 It was built for a family Thanksgiving, but nothing in it is Thanksgiving-specific. A birthday dinner, a reunion, a holiday brunch or a potluck works the same way: you describe the occasion in a few plain files, and the assistant takes on a persona you choose ("Tom the Turkey 🦃" for Thanksgiving, someone else for the next occasion).
 
-> **How it texts.** By default the assistant runs on a Mac through the **Messages app**: iPhone relatives get iMessages, and everyone else gets ordinary SMS relayed through an iPhone. It needs its own Apple ID and, for SMS, its own phone number (see [Setting up Messages](#setting-up-messages)). A WhatsApp mode is still there (`TRANSPORT=whatsapp`). It uses [Baileys](https://github.com/WhiskeySockets/Baileys), an unofficial WhatsApp client, which is against WhatsApp's terms and can get the number banned, so use it only with a spare number.
+> **How it texts.** By default the assistant runs on a Mac through the **Messages app**: iPhone relatives get iMessages, and everyone else gets ordinary SMS relayed through an iPhone. It can text from your own number, so no extra phone is needed (see [Setting up Messages](#setting-up-messages)). A WhatsApp mode is still there (`TRANSPORT=whatsapp`). It uses [Baileys](https://github.com/WhiskeySockets/Baileys), an unofficial WhatsApp client, which is against WhatsApp's terms and can get the number banned, so use it only with a spare number.
 
 ## What it's like
 
@@ -86,7 +86,7 @@ Pick the occasion with `HOLIDAY` and `YEAR` in `.env` (for example `HOLIDAY=than
 
 ## Texting the bot
 
-From the host's own phone:
+From the host's own phone (with `TEXT_AS=me`, in the chat with yourself):
 
 | Text | What happens |
 |---|---|
@@ -117,14 +117,14 @@ You'll need:
 - Node 24 or newer
 - an [Anthropic API key](https://console.anthropic.com)
 - a Mac that stays on during the planning weeks
-- an Apple ID for the assistant, and ideally a spare iPhone with its own number (see [Setting up Messages](#setting-up-messages))
+- your iPhone, signed in to the same Apple ID as the Mac (see [Setting up Messages](#setting-up-messages))
 
 ```bash
 npm install
 mkdir -p private && cp -R examples/data/* private/ && cp examples/env.example private/.env
 ```
 
-1. **Fill in the settings.** In `private/.env`, set `ANTHROPIC_API_KEY`. `TRANSPORT=messages` is the default. To post announcements to a group chat instead of texting everyone, set `GROUP_NAME` to the chat's exact name in Messages.
+1. **Fill in the settings.** In `private/.env`, set `ANTHROPIC_API_KEY`. `TRANSPORT=messages` is the default. To post announcements to a group chat instead of texting everyone, set `GROUP_NAME` to the chat's exact name in Messages. `TEXT_AS=me` (the default) texts from your own number.
 2. **Describe your occasion.** Edit `private/family.yaml` and the files under `private/holidays/`.
 3. **Try it without sending anything.** These run messages through the real AI but don't send any texts or save anything:
    ```bash
@@ -141,20 +141,26 @@ mkdir -p private && cp -R examples/data/* private/ && cp examples/env.example pr
    ```bash
    npm run hc -- serve
    ```
-6. **Text it `status`** from your own phone to check it's working. Then text yourself `tell <your name>: test` from the bot to check sending.
+6. **Text yourself `status`** from your phone. The assistant answers in the same chat. Then try `tell <a relative>: test from Tom` with someone who knows it's coming.
 
 ### Setting up Messages
 
-The bot sends from whichever Apple ID is signed in to Messages on the Mac, and treats any text it sends as its own. So it needs **its own Apple ID**, separate from yours. Otherwise it would text your family as you, and your commands would look like its own messages.
+By default (`TEXT_AS=me`) the assistant texts **from your own number**, through Messages on a Mac signed in to your Apple ID. Your family sees the texts in their usual thread with you, signed by the persona ("— Tom 🦃"), so they can tell which ones the assistant wrote.
 
-1. **Give the assistant an identity.** Pick one:
-   - **Best:** a spare iPhone with a prepaid SIM, signed in to the assistant's Apple ID. That reaches everyone: iPhones get iMessage, and Android phones get SMS through the spare iPhone. On that iPhone, go to Settings → Apps → Messages → Text Message Forwarding and turn on the Mac. Keep the iPhone charged and on Wi-Fi.
-   - **iMessage only:** an Apple ID with just an email address. No extra phone is needed, but relatives without iPhones can't be reached.
-2. **Sign the Mac in.** Messages is per macOS user. If your own Messages is signed in to your Apple ID, create a separate macOS user for the assistant (System Settings → Users & Groups), log in to it, and sign Messages in there with the assistant's Apple ID. Run the bot from that user. Fast User Switching keeps it running while you use your own account.
-3. **Give permissions.** In that user, go to System Settings → Privacy & Security → Full Disk Access and add Terminal and node. To find node's real file, run `realpath $(which node)` and press ⌘⇧G in the file picker to paste the path. The first `npm run hc -- check` also asks to let Terminal control Messages; allow it.
-4. **Tell people it's coming.** Ask everyone to save the assistant's number (or email) as a contact, so the first text isn't filtered as unknown.
+1. **Turn on texting from the Mac.** On your iPhone, go to Settings → Apps → Messages, and check that **Text Message Forwarding** is on for the Mac. That lets the Mac send SMS to relatives without iPhones. Open Messages on the Mac, sign in with your Apple ID, and send yourself a test text.
+2. **Give permissions.** In System Settings → Privacy & Security → Full Disk Access, add Terminal and node. To find node's real file, run `realpath $(which node)` and press ⌘⇧G in the file picker to paste the path. The first `npm run hc -- check` also asks to let Terminal control Messages; allow it.
+3. **Send commands by texting yourself.** In Messages on your phone, start a chat with your own number and type `status`. Everything you used to text the bot (`rsvp`, `#4 ok`, `tell Robin: …`) goes in that chat, and the assistant answers there. If your texts to yourself go to your Apple ID email, put that email in `HOST_APPLE_ID`.
 
-If an iMessage can't be delivered (the person isn't on iMessage), the bot sends it again as SMS. After that, it uses SMS with that person.
+Because it's your own number, the assistant is careful about what it answers:
+- **Only the occasion.** A screening model decides whether each text is about the gathering. Anything else ("did you see the game?") gets no reply, and when it's unsure, it stays out. People not in `family.yaml` are ignored entirely.
+- **It steps back when you're talking.** If you've texted someone yourself in the last 30 minutes, the assistant doesn't reply to them. It still records an RSVP or dish answer from what they say, and tells you if they said yes.
+- **It knows what you said.** Texts you send people yourself become part of the conversation it reads, so it doesn't repeat or contradict you.
+
+**Carrier limits.** iMessages go through Apple, not your carrier. SMS go out from your iPhone like ordinary texts. Carriers watch for spam-like volume, typically hundreds of near-identical texts quickly, and a family's invitations are far below that. The assistant also spaces out bulk sends by a few seconds. Expect a burst of a dozen or two texts when you send `rsvp`, then a trickle.
+
+If an iMessage can't be delivered (the person isn't on iMessage), the assistant sends it again as SMS. After that, it uses SMS with that person.
+
+**Giving the assistant its own identity instead.** Set `TEXT_AS=assistant` and run it in a separate macOS user whose Messages is signed in to an Apple ID just for the assistant. A spare iPhone with Text Message Forwarding adds SMS. You then text the assistant like any other contact.
 
 ### WhatsApp mode
 

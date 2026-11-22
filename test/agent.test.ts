@@ -7,6 +7,7 @@ import { loadConfig, saveDish, titleCase, type Config } from "../src/config.ts";
 import { openDb, type Db } from "../src/db.ts";
 import { handleInbound, statusText, dietaryConflicts, ovensText, reminderMessages, type Ctx } from "../src/agent.ts";
 import { toInbound, worthCatchingUp } from "../src/whatsapp.ts";
+import { useTransport } from "../src/transport.ts";
 import { LIMITS, leaksPhone } from "../src/guard.ts";
 
 process.env.DRY_RUN = "1";
@@ -662,3 +663,58 @@ test("daily reminders: missing RSVPs and unconfirmed dishes, after 24 quiet hour
   await handleInbound(ctx, { waId: "w1", from: HOST, text: "remind" });
   assert.match(outbound(HOST).at(-1)!, /^(Daily reminders: Sent to|No reminders due)/);
 });
+
+// Texting from the host's own number: the bot sees all of the host's texts with these people
+async function asHost(fn: () => Promise<void>) {
+  useTransport({ name: "test", sharesHostNumber: true, spacing: [0, 0], send: async () => {}, start: async () => {} });
+  try {
+    await fn();
+  } finally {
+    useTransport(undefined);
+  }
+}
+const byHost = (phone: string) =>
+  db.prepare("SELECT body FROM messages WHERE phone = ? AND direction = 'out' AND wa_id IS NOT NULL").all(phone).map((r) => r.body);
+
+test("texting as you: strangers and everyday texts get no reply", () =>
+  asHost(async () => {
+    await handleInbound({ config, db, client: null as any }, { waId: "w1", from: "19998887777", text: "your package is delayed" });
+    assert.equal(outbound(HOST).length, 0, "no 'unknown number' alerts for the host's own texts");
+    const { client, requests } = fakeClient([], "off_topic");
+    await handleInbound({ config, db, client }, { waId: "w2", from: SUE, text: "did you see the game last night?" });
+    assert.equal(outbound(SUE).length, 0, "Tom doesn't butt in");
+    assert.equal(requests.length, 0);
+  }));
+
+test("texting as you: what you type is kept, the bot's echoes aren't", () =>
+  asHost(async () => {
+    const { client } = fakeClient([turn(toolUse("a", "reply", { text: "It's at 2! — Tom 🦃" })), done]);
+    await handleInbound({ config, db, client }, { waId: "w1", from: SUE, text: "what time?" });
+    await handleInbound({ config, db, client }, { waId: "w2", from: SUE, text: "It's at 2! — Tom 🦃", mine: true });
+    assert.deepEqual(byHost(SUE), [], "the bot's own text came back and was skipped");
+    await handleInbound({ config, db, client }, { waId: "w3", from: SUE, text: "Can't wait to see you!", mine: true });
+    assert.deepEqual(byHost(SUE), ["Can't wait to see you!"]);
+  }));
+
+test("texting as you: while you're talking with someone, the bot records but stays quiet", () =>
+  asHost(async () => {
+    await handleInbound({ config, db, client: null as any }, { waId: "w1", from: SUE, text: "Are you guys hosting this year?", mine: true });
+    const { client, requests } = fakeClient([
+      turn(toolUse("a", "record_rsvp", { status: "yes" }), toolUse("b", "reply", { text: "Yay! — Tom 🦃" })),
+      done,
+    ]);
+    await handleInbound({ config, db, client }, { waId: "w2", from: SUE, text: "Yes! We'll be there" });
+    assert.equal(outbound(SUE).filter((b) => b.includes("Tom")).length, 0, "no reply from Tom mid-conversation");
+    assert.match(JSON.stringify(requests[1].messages.at(-1).content), /not sent/);
+    assert.match(requests[0].messages[0].content, /Alex \(personally\): Are you guys hosting/);
+    assert.match(outbound(HOST).at(-1)!, /Aunt Sue said yes while you were texting them/);
+    assert.equal(db.prepare("SELECT status FROM rsvps WHERE phone = ?").get(SUE)?.status, "yes");
+  }));
+
+test("texting as you: the bot's replies in your self-chat aren't run as commands", () =>
+  asHost(async () => {
+    await handleInbound({ config, db, client: null as any }, { waId: "w1", from: HOST, text: "status" });
+    const reply = outbound(HOST)[0];
+    await handleInbound({ config, db, client: null as any }, { waId: "w2", from: HOST, text: reply });
+    assert.equal(outbound(HOST).length, 1);
+  }));

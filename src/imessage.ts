@@ -47,6 +47,7 @@ export type ChatRow = {
   body: Uint8Array | null;
   date: number; // milliseconds since 2001
   handle: string;
+  from_me: number;
 };
 
 /** "+15550000001" → "15550000001"; email handles (iMessage from an Apple ID) are kept as they are. */
@@ -55,14 +56,14 @@ const fromHandle = (h: string) => (h.includes("@") ? h.toLowerCase() : h.replace
 export function rowToInbound(r: ChatRow): Inbound | undefined {
   const text = (r.text ?? textFromAttributedBody(r.body))?.replace(/￼/g, "").trim(); // U+FFFC marks an attachment
   if (!text) return;
-  return { waId: r.guid, from: fromHandle(r.handle), text, ts: APPLE_EPOCH_MS + r.date };
+  return { waId: r.guid, from: fromHandle(r.handle), text, ts: APPLE_EPOCH_MS + r.date, ...(r.from_me ? { mine: true } : {}) };
 }
 
-// Incoming one-to-one texts only: no group chats, tapbacks, edits/unsends or our own messages
-const INCOMING = `
-  SELECT m.ROWID AS rowid, m.guid, m.text, m.attributedBody AS body, ${DATE_MS} AS date, h.id AS handle
+// One-to-one texts, both ways: no group chats, tapbacks or edits/unsends
+const ONE_TO_ONE = `
+  SELECT m.ROWID AS rowid, m.guid, m.text, m.attributedBody AS body, ${DATE_MS} AS date, h.id AS handle, m.is_from_me AS from_me
   FROM message m JOIN handle h ON h.ROWID = m.handle_id
-  WHERE m.is_from_me = 0 AND m.item_type = 0 AND m.associated_message_type = 0
+  WHERE m.item_type = 0 AND m.associated_message_type = 0
     AND NOT EXISTS (SELECT 1 FROM chat_message_join cmj JOIN chat c ON c.ROWID = cmj.chat_id
                     WHERE cmj.message_id = m.ROWID AND c.style = 43)`;
 
@@ -81,8 +82,8 @@ export function openChatDb(path = CHAT_DB) {
 /** Messages that arrived after rowid, plus (on the first call) recent ones newer than since. */
 export function newMessages(db: DatabaseSync, afterRowid: number | bigint, since?: number): ChatRow[] {
   if (since !== undefined)
-    return db.prepare(`${INCOMING} AND m.date > ? ORDER BY m.ROWID`).all(msToAppleDate(since)) as unknown as ChatRow[];
-  return db.prepare(`${INCOMING} AND m.ROWID > ? ORDER BY m.ROWID`).all(afterRowid) as unknown as ChatRow[];
+    return db.prepare(`${ONE_TO_ONE} AND m.date > ? ORDER BY m.ROWID`).all(msToAppleDate(since)) as unknown as ChatRow[];
+  return db.prepare(`${ONE_TO_ONE} AND m.ROWID > ? ORDER BY m.ROWID`).all(afterRowid) as unknown as ChatRow[];
 }
 
 const maxRowid = (db: DatabaseSync) => (db.prepare("SELECT COALESCE(MAX(ROWID), 0) AS n FROM message").get()!.n as number);
@@ -136,25 +137,67 @@ export function sendFailed(db: DatabaseSync, handle: string, afterRowid: number)
   return !!row && Number(row.error) !== 0;
 }
 
-export function imessage(opts: { chatDb?: string; run?: RunScript; failCheckMs?: number } = {}): Transport {
+/**
+ * Decides which chat.db rows reach the bot, and as what. host: see imessage(). remember(): call before each send,
+ * so the bot's own texts (and iMessage's echo of texts to yourself) aren't read back as the host's.
+ */
+export function inboundFilter(opts: { host?: string; selfHandles?: string[] }) {
+  // What the bot sent lately, so its own texts (and iMessage's echo of texts to yourself) aren't read back as the host's
+  const sent = new Map<string, number>();
+  const ECHO_MS = 5 * 60_000;
+  const remember = (handle: string, text: string) => sent.set(`${fromHandle(handle)}\n${text.trim()}`, Date.now());
+  const isEcho = (m: Inbound) => {
+    const at = sent.get(`${m.from}\n${m.text}`);
+    return at !== undefined && Date.now() - at < ECHO_MS;
+  };
+  const self = new Set([opts.host, ...(opts.selfHandles ?? [])].filter(Boolean).map((h) => fromHandle(h!)));
+  let lastSelf: { text: string; at: number } | undefined;
+
+  /** Which rows become messages for the bot, and as what. */
+  const accept = (m: Inbound): Inbound | undefined => {
+    if (!opts.host) return m.mine ? undefined : m; // the bot's own Apple ID: only what others send it
+    if (isEcho(m)) return;
+    if (self.has(m.from)) {
+      // a text to yourself can appear twice (sent and received); act on it once
+      if (lastSelf && lastSelf.text === m.text && Math.abs((m.ts ?? 0) - lastSelf.at) < 60_000) return;
+      lastSelf = { text: m.text, at: m.ts ?? 0 };
+      return { waId: m.waId, from: opts.host, text: m.text, ...(m.ts ? { ts: m.ts } : {}) };
+    }
+    return m;
+  };
+
+  return { accept, remember };
+}
+
+/**
+ * host: the host's phone (digits) when the bot texts from the host's own Apple ID. Then the host's texts to
+ * themselves ("message yourself") are commands, and what the host types to anyone else comes through as `mine`.
+ * selfHandles: other handles the host's self-chat may use, such as their Apple ID email.
+ */
+export function imessage(opts: { chatDb?: string; run?: RunScript; failCheckMs?: number; host?: string; selfHandles?: string[] } = {}): Transport {
   const run = opts.run ?? osascript;
   let db: DatabaseSync | undefined;
   const chat = () => (db ??= openChatDb(opts.chatDb));
   const handleFor = (to: string) => (to.includes("@") ? to : `+${to}`);
 
+  const { accept, remember } = inboundFilter(opts);
+
   return {
     name: "Messages",
+    sharesHostNumber: !!opts.host,
     spacing: [1500, 2500], // no ban risk, but carriers filter bursts of identical texts
     async send(to, text) {
       const handle = handleFor(to);
       const service = serviceFor(chat(), handle);
       const before = maxRowid(chat());
+      remember(handle, text);
       await run(SEND_SCRIPT, [handle, text, service]);
       // iMessage to someone who isn't on iMessage fails a few seconds later; send it again as SMS
       if (service === "iMessage" && !handle.includes("@"))
         setTimeout(() => {
           if (!sendFailed(chat(), handle, before)) return;
           console.log(`iMessage to ${handle} failed, sending as SMS instead.`);
+          remember(handle, text);
           run(SEND_SCRIPT, [handle, text, "SMS"]).catch((err) => console.error(`SMS to ${handle} failed too:`, err.message));
         }, opts.failCheckMs ?? 15_000);
     },
@@ -164,7 +207,7 @@ export function imessage(opts: { chatDb?: string; run?: RunScript; failCheckMs?:
       let after = maxRowid(d);
       // catch up on recent messages that arrived while the bot was off; already-answered ones are skipped by guid
       const since = Math.max(catchUpSince, Date.now() - CATCH_UP_MS);
-      const missed = newMessages(d, 0, since).map(rowToInbound).filter((m): m is Inbound => !!m);
+      const missed = newMessages(d, 0, since).map(rowToInbound).map((m) => m && accept(m)).filter((m): m is Inbound => !!m);
       if (missed.length) console.log(`${new Date().toLocaleTimeString()} Catching up on ${missed.length} message(s) that arrived while offline.`);
       missed.forEach(onMessage);
       console.log(`${new Date().toLocaleTimeString()} Messages connected. Listening for texts.`);
@@ -174,7 +217,8 @@ export function imessage(opts: { chatDb?: string; run?: RunScript; failCheckMs?:
           for (const r of rows) {
             after = r.rowid;
             const m = rowToInbound(r);
-            if (m) onMessage(m);
+            const ok = m && accept(m);
+            if (ok) onMessage(ok);
           }
         } catch (err) {
           console.error("Couldn't read new messages:", (err as Error).message);
