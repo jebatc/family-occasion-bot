@@ -239,10 +239,12 @@ export async function checkMessages(run: RunScript = osascript) {
     lines.push(`❌ ${(err as Error).message}`);
   }
   try {
-    const out = await run(`tell application "Messages" to get service type of every account`, []);
-    const types = out.trim();
-    lines.push(`✅ Can control Messages. Accounts: ${types || "none"}.`);
-    if (!/SMS/.test(types)) lines.push("⚠️ No SMS account: relatives without iPhones won't get texts. On the iPhone: Settings → Apps → Messages → Text Message Forwarding → turn on this Mac.");
+    await run(`tell application "Messages" to get id of every account`, []);
+    // ask per type, the way SEND_SCRIPT picks an account: "service type of every account" fails if any one account is broken
+    const has = (type: string) => run(`tell application "Messages" to get id of (1st account whose service type = ${type})`, []).then(() => true, () => false);
+    const types = [(await has("iMessage")) && "iMessage", (await has("SMS")) && "SMS"].filter(Boolean);
+    lines.push(`✅ Can control Messages. Accounts: ${types.join(", ") || "none"}.`);
+    if (!types.includes("SMS")) lines.push("⚠️ No SMS account: relatives without iPhones won't get texts. On the iPhone: Settings → Apps → Messages → Text Message Forwarding → turn on this Mac.");
   } catch (err) {
     lines.push(`❌ Can't control Messages (${(err as Error).message}). Allow it under System Settings → Privacy & Security → Automation.`);
   }
