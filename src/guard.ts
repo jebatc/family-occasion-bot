@@ -1,9 +1,8 @@
 import type Anthropic from "@anthropic-ai/sdk";
-import type { Config, Person } from "./config.ts";
-import type { Db } from "./db.ts";
+import type { Config } from "./config.ts";
 
 export const LIMITS = {
-  messagesPerHour: 20, // per guest; beyond this the bot stops auto-replying for the hour
+  messagesPerHour: 20, // per person; beyond this triage stops referring their texts for the hour
   writesPerMessage: 4, // data changes one incoming message may cause
   openProposals: 2, // new-dish offers per guest still waiting on the host
   field: 300, // characters kept from any text a guest's message puts into the plan
@@ -18,7 +17,7 @@ export type Verdict = { verdict: "relevant" | "off_topic" | "suspicious"; reason
 
 const SCREEN_MODEL = "claude-haiku-5-5";
 
-const SCREEN_PROMPT = `You screen WhatsApp messages sent to a family's Thanksgiving planning assistant before it answers them. Classify the newest guest message.
+const SCREEN_PROMPT = `You screen text messages sent to a family's Thanksgiving planning assistant before it answers them. Classify the newest guest message.
 
 - relevant: anything about the family's Thanksgiving gathering or the conversation with the assistant: RSVPs, who's coming, dishes, recipes, ingredients, dietary needs, timing, the address, Hot Dog Night, offering to bring something, questions for the host, greetings, thanks, short replies like "yes", "ok", "hi", emoji.
 - off_topic: unrelated requests the assistant shouldn't spend time on: homework, coding, trivia, news, other events, general chatbot use.
@@ -26,8 +25,16 @@ const SCREEN_PROMPT = `You screen WhatsApp messages sent to a family's Thanksgiv
 
 Judge only the newest message, using the recent conversation for context. Short or casual replies to the assistant's own questions are relevant. When unsure between relevant and off_topic, choose relevant.`;
 
+// On the host's own number the default flips: only clearly gathering-related messages get the assistant
+const sharedNumberNote = (host: string) => `
+
+The assistant texts from ${host}'s own phone number, so ${host} gets everyday personal texts from these same people. ${host}'s own personal messages are never shown. Here:
+- relevant means the newest message touches the gathering or its logistics in any way (who's coming, food, timing, travel, where people are staying, getting there), or answers something the Assistant asked. A message that mixes personal news with anything about the gathering is relevant.
+- off_topic means nothing in it concerns the gathering: purely personal chat, or greetings, thanks or emoji that aren't replying to the Assistant.`;
+
 /** Asks a small model whether the guest's newest message should be answered. Throws on API errors: the caller holds the message. */
-export async function screenMessage(client: Anthropic, guest: Person, history: { direction: string; body: string }[]): Promise<Verdict> {
+/** hostName: set when the assistant texts from the host's own number, so most of what arrives is ordinary personal texting. */
+export async function screenMessage(client: Anthropic, guest: { name: string }, history: { direction: string; body: string }[], hostName?: string): Promise<Verdict> {
   const transcript = history.map((m) => `${m.direction === "in" ? guest.name : "Assistant"}: ${clip(m.body, 500)}`).join("\n");
   const res = await client.messages.create({
     model: SCREEN_MODEL,
@@ -47,7 +54,7 @@ export async function screenMessage(client: Anthropic, guest: Person, history: {
         },
       },
     },
-    system: SCREEN_PROMPT,
+    system: hostName ? SCREEN_PROMPT + sharedNumberNote(hostName) : SCREEN_PROMPT,
     messages: [{ role: "user", content: `<conversation>\n${transcript}\n</conversation>\nClassify the newest message from ${guest.name}.` }],
   } as Parameters<Anthropic["messages"]["create"]>[0]);
   if (res.stop_reason === "refusal") return { verdict: "suspicious", reason: "the screening model declined to read it" };
@@ -63,7 +70,3 @@ export function leaksPhone(text: string, config: Config) {
   if ([config.host, ...config.people].some((p) => p.phone && digits.includes(p.phone.slice(-10)))) return true;
   return /(\+?\d[\d\s().-]{8,}\d)/.test(text) && /\d{3}\D{0,3}\d{3}\D{0,3}\d{4}/.test(text);
 }
-
-/** How many messages this guest sent in the last hour. */
-export const recentMessages = (db: Db, phone: string) =>
-  Number(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE phone = ? AND direction = 'in' AND ts > ?").get(phone, Date.now() - 3600_000)?.n ?? 0);

@@ -3,50 +3,31 @@ import makeWASocket, {
   type WASocket, type WAMessage,
 } from "baileys";
 import pino from "pino";
-import { type Db, logMessage } from "./db.ts";
+import type { Inbound, Transport } from "./transport.ts";
 
 let sock: WASocket | undefined;
 let drops = 0; // consecutive drops since the last successful connection
 
-async function send(jid: string, text: string) {
-  if (process.env.DRY_RUN) return console.log(`[dry-run] → ${jid}: ${text}`);
+function socket() {
   if (!sock) throw new Error("WhatsApp isn't connected");
-  await sock.sendMessage(jid, { text });
+  return sock;
 }
 
-// Messages to the same person are spaced out, so a follow-up never lands right after the one before it
-const lastSent = new Map<string, number>();
-const gapMs = () => Number(process.env.MESSAGE_GAP_MS ?? 5 * 60_000);
-
-async function pace(to: string) {
-  const wait = (lastSent.get(to) ?? 0) + gapMs() - Date.now();
-  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-  lastSent.set(to, Date.now());
-}
-
-export async function sendText(db: Db, to: string, body: string) {
-  await pace(to);
-  await send(`${to}@s.whatsapp.net`, body);
-  logMessage(db, to, "out", body);
-}
-
-/** Posts to a group: the one a message came from (jid), or else the family group by name. */
-export async function postToGroup(db: Db, groupName: string, body: string, jid?: string) {
-  let target = jid ?? "dry-run-group";
-  if (!jid && !process.env.DRY_RUN) {
-    const groups = Object.values(await sock!.groupFetchAllParticipating());
+/** The WhatsApp transport. botPhone: the spare number, digits with country code. */
+export const whatsapp = (authDir: string, botPhone: string): Transport => ({
+  name: "WhatsApp",
+  spacing: [4000, 6000], // rapid-fire messages from an unofficial client are what gets numbers banned
+  send: async (to, text) => void (await socket().sendMessage(`${to}@s.whatsapp.net`, { text })),
+  async postToGroup(groupName, text) {
+    const groups = Object.values(await socket().groupFetchAllParticipating());
     const group = groups.find((g) => g.subject.trim().toLowerCase() === groupName.trim().toLowerCase());
     if (!group) throw new Error(`The bot isn't in a group named "${groupName}"`);
-    target = group.id;
-  }
-  await send(target, body);
-  logMessage(db, "group", "out", body);
-}
+    await socket().sendMessage(group.id, { text });
+  },
+  start: (onMessage, catchUpSince) => connect(authDir, botPhone, onMessage, catchUpSince),
+});
 
-// Spread bulk sends out: rapid-fire messages from an unofficial client are what gets numbers banned
-export const pause = () => new Promise((r) => setTimeout(r, process.env.DRY_RUN ? 0 : 4000 + Math.random() * 6000));
-
-export type Inbound = { waId: string; from: string; text: string; ts?: number; group?: string }; // group: the group's id, when it came from one
+export type { Inbound };
 
 const CATCH_UP_MS = 3 * 24 * 3600 * 1000;
 
@@ -77,7 +58,7 @@ const warn = console.warn;
 console.warn = (...args: unknown[]) => void (/^Session already/.test(String(args[0])) || warn(...args));
 
 /** catchUpSince: when the bot last logged a message; catch-up messages newer than that get answered. */
-export async function connect(authDir: string, botPhone: string, onMessage: (m: Inbound) => void, catchUpSince = Date.now()) {
+async function connect(authDir: string, botPhone: string, onMessage: (m: Inbound) => void, catchUpSince = Date.now()) {
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
   // an outdated WhatsApp Web version is a common cause of connections that keep dropping
   const version = await fetchLatestBaileysVersion().then((v) => v.version).catch(() => undefined);

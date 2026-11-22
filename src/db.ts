@@ -16,14 +16,17 @@ export function openDb(path: string): Db {
   `);
   // Databases created before dish proposals lack the column
   if (!db.prepare("SELECT 1 FROM pragma_table_info('escalations') WHERE name = 'dish'").get()) db.exec("ALTER TABLE escalations ADD COLUMN dish TEXT");
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'hash'").get()) db.exec("ALTER TABLE messages ADD COLUMN hash TEXT");
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'why'").get()) db.exec("ALTER TABLE messages ADD COLUMN why TEXT");
   return db;
 }
 
-/** Returns false when this WhatsApp message id was already logged (WhatsApp can redeliver). */
-export function logMessage(db: Db, phone: string, direction: "in" | "out", body: string, waId?: string) {
+/** Logs a message. Returns false when this message id was already logged (redeliveries). */
+/** why: for a text the bot sends, the reason it sent it. */
+export function logMessage(db: Db, phone: string, direction: "in" | "out", body: string, waId?: string, hash?: string, why?: string) {
   const r = db
-    .prepare("INSERT OR IGNORE INTO messages (wa_id, phone, direction, body, ts) VALUES (?, ?, ?, ?, ?)")
-    .run(waId ?? null, phone, direction, body, Date.now());
+    .prepare("INSERT OR IGNORE INTO messages (wa_id, phone, direction, body, ts, hash, why) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run(waId ?? null, phone, direction, body, Date.now(), hash ?? null, why ?? null);
   return r.changes > 0;
 }
 
