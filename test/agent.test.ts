@@ -773,3 +773,51 @@ test("every text Tom sends records why, and the dashboard lists what he plans to
   const answer = snap.planned.find((p) => p.trigger === 'When you text "#1 ok"');
   assert.deepEqual([answer?.to, answer?.text, answer?.why], ["Aunt Sue", "Of course, bring Biscuit!", "Suggested answer to question #1"]);
 });
+
+test("an errand: Tom asks, nudges until it's done, and tells the host", async () => {
+  const CLARK = "15550000050";
+  writeFileSync(join(dir, "family.yaml"), readFileSync(join(dir, "family.yaml"), "utf8") + `  - name: Clark\n    phone: "${CLARK}"\n`);
+  saveDish(config.eventFile, "Wine Run", { course: "Task", owner: "Clark", status: "Proposed", done_by: "Wednesday, November 25" });
+  reload();
+  rsvpYes(CLARK);
+  await handleInbound({ config, db, client: null as any }, { waId: "w1", from: HOST, text: "request Clark" });
+  assert.match(outbound(CLARK)[0], /could you please take care of this by Wednesday, November 25\? Wine Run\. I'll check in until it's done\./);
+
+  const yes = fakeClient([turn(toolUse("a", "record_contribution", { dish: "Wine Run", status: "confirmed" }), toolUse("b", "reply", { text: "Thanks, Clark! — Tom 🦃" })), done]);
+  await handleInbound({ config, db, client: yes.client }, { waId: "w2", from: CLARK, text: "Sure, I'll grab it Tuesday" });
+  reload();
+  assert.match(yes.requests[0].messages[0].content, /errand, to do by Wednesday, November 25/);
+  assert.equal(findDishByName("Wine Run")?.status, "confirmed");
+
+  // agreed isn't done: the next day Tom checks in
+  const nextDay = new Date(Date.now() + 48 * 3600_000); nextDay.setHours(11);
+  const nudge = reminderMessages({ config, db, client: null as any }, nextDay).find((o) => o.phone === CLARK);
+  assert.match(String(nudge?.text), /Have you had a chance to do it yet\? Reply DONE once it's done/);
+  assert.equal(nudge?.why, "Daily nudge: agreed to Wine Run, not done yet");
+
+  const did = fakeClient([turn(toolUse("a", "record_contribution", { dish: "Wine Run", status: "done", note: "2 cases" }), toolUse("b", "reply", { text: "Amazing, thank you! — Tom 🦃" })), done]);
+  await handleInbound({ config, db, client: did.client }, { waId: "w3", from: CLARK, text: "Got the wine! 2 cases" });
+  reload();
+  assert.equal(findDishByName("Wine Run")?.status, "done");
+  assert.match(outbound(HOST).at(-1)!, /✅ Clark has done it: Wine Run \(2 cases\)/);
+  assert.equal(reminderMessages({ config, db, client: null as any }, nextDay).some((o) => o.phone === CLARK), false, "no more nudges");
+  assert.match(statusText(config, db), /Wine Run 🏁/);
+});
+
+test("the host adds an errand by text, and Tom starts following up", async () => {
+  const CLARK = "15550000050";
+  writeFileSync(join(dir, "family.yaml"), readFileSync(join(dir, "family.yaml"), "utf8") + `  - name: Clark\n    phone: "${CLARK}"\n`);
+  reload();
+  await handleInbound({ config, db, client: null as any }, { waId: "w1", from: HOST, text: "errand Clark: pick up the wine by Wednesday, November 25" });
+  assert.equal(outbound(HOST)[0], "Added: Pick up the wine, for Clark, by Wednesday, November 25. I'll check in with Clark once a day (10 AM to 7 PM) until it's done, and text you when it is.");
+  reload();
+  const wine = findDishByName("Pick up the wine");
+  assert.deepEqual([wine?.owner, wine?.status, wine?.done_by, wine?.course], ["Clark", "confirmed", "Wednesday, November 25", "task"]);
+  assert.match(eventYaml(), /dish: Pick up the wine\n\s+course: Task\n\s+owner: Clark\n\s+status: Confirmed\n\s+done_by: Wednesday, November 25/);
+  const at = new Date(); at.setHours(11);
+  const nudge = reminderMessages({ config, db, client: null as any }, at).find((o) => o.phone === CLARK);
+  assert.match(String(nudge?.text), /^Hi Clark! Thanks for taking care of Pick up the wine \(by Wednesday, November 25\)/);
+
+  await handleInbound({ config, db, client: null as any }, { waId: "w2", from: HOST, text: "errand Dana: anything by Monday" });
+  assert.match(outbound(HOST).at(-1)!, /I don't have anyone called "Dana"/);
+});

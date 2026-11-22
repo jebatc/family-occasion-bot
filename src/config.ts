@@ -14,7 +14,8 @@ export type Dish = {
   quantity?: number | string; // e.g. 2 pecan pies
   course?: string; // appetizer, main, side, dessert, drink, or "task" for a day-of job (not something to bring)
   owner?: string | string[] | null; // a name from family.yaml (or the host), or a list for shared tasks; empty = needs an owner
-  status?: "proposed" | "requested" | "confirmed"; // proposed = not asked yet; requested = asked; confirmed = owner said yes
+  status?: "proposed" | "requested" | "confirmed" | "done"; // proposed = not asked yet; requested = asked; confirmed = owner said yes; done = an errand finished
+  done_by?: string; // makes it an errand to finish before the day, e.g. "Wednesday, November 25"; Tom nudges until it's done
   confirmation?: string; // when and how the owner confirmed
   declined_by?: string; // last person who said no; the dish goes back to proposed with no owner
   fallback?: string; // who takes it if the owner says no (instead of leaving it unowned)
@@ -82,14 +83,14 @@ export const titleCase = (s: string) => s.trim().replace(/(^|[\s(\/-])(\p{Ll})/g
 
 const sameDish = (a: unknown, b: string) => String(a).trim().toLowerCase() === b.trim().toLowerCase();
 
-/** Updates a dish in event.yaml (or appends it if new), keeping the file's comments and layout. */
-export function saveDish(eventFile: string, name: string, patch: Partial<Dish>) {
+/** Updates a dish in event.yaml (or appends it if new), keeping the file's comments and layout. keepName: write a new dish's name as given, not title-cased. */
+export function saveDish(eventFile: string, name: string, patch: Partial<Dish>, keepName = false) {
   const doc = parseDocument(readFileSync(eventFile, "utf8"));
   const menu = doc.get("menu") as YAMLSeq<YAMLMap> | undefined;
   const item = menu?.items.find((d) => sameDish(d.get("dish"), name));
-  for (const k of ["dish", "course", "status"] as const) if (typeof patch[k] === "string") (patch as Record<string, string>)[k] = titleCase(patch[k]);
+  for (const k of ["dish", "course", "status"] as const) if (typeof patch[k] === "string" && !(k === "dish" && keepName)) (patch as Record<string, string>)[k] = titleCase(patch[k]);
   if (item) for (const [k, v] of Object.entries(patch)) item.set(k, v);
-  else doc.addIn(["menu"], doc.createNode({ dish: titleCase(name), ...patch }));
+  else doc.addIn(["menu"], doc.createNode({ dish: keepName ? name.trim() : titleCase(name), ...patch }));
   writeFileSync(eventFile, doc.toString({ lineWidth: 0 }));
 }
 

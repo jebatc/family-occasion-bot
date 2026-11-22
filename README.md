@@ -83,6 +83,7 @@ Pick the occasion with `HOLIDAY` and `YEAR` in `.env` (for example `HOLIDAY=than
 | `fallback` | Who takes the dish if the owner says no |
 | `confirm_on_rsvp` | For tasks that come with attending: never asked about, confirmed by the household's yes |
 | `course: Task` | A day-of job ("Glaze the carrots at 1:33") rather than something to bring |
+| `done_by` | Makes it an errand to finish before the day ("Pick up the wine", `done_by: Wednesday, November 25`). Tom asks by that date, nudges daily until they say it's done, marks it Done and tells you |
 
 `examples/data/` has a small, complete example to copy from.
 
@@ -99,6 +100,7 @@ From the host's own phone (with `TEXT_AS=me`, in the chat with yourself):
 | `remind` | Sends any reminders that are due right now (normally once a day, automatically) |
 | `#<n> ok` / `#<n> no` / `#<n> <answer>` | Answers a question the bot sent you, approves or turns down an offered dish |
 | `tell <name>: <message>` | Sends your own words to someone through the bot |
+| `errand <name>: <task> by <day>` | Adds an errand they've agreed to ("errand Clark: Pick up the wine by Wednesday"). Tom checks in daily until they say it's done, then tells you |
 | `ovens` | Each oven's lineup in time order, with temperatures |
 | `temps` / `temp <dish> <°F> [minutes]` | Asks guests for missing oven temperatures, or sets one for your own dish |
 | `changes` | The latest changes guests' messages made, and any messages it held back |
@@ -198,7 +200,7 @@ While it runs, Tom writes `private/dashboard.json` every 5 minutes: RSVPs, dishe
 
 A dashboard on claude.ai ("Tom's Thanksgiving Desk") shows that file once it's uploaded. Claude on your Mac can upload it when you ask ("refresh Tom's dashboard"), or as a scheduled task in the Claude desktop app with this prompt:
 
-> In the family-occasion-bot folder, run `npm run hc -- snapshot`. Upload `private/dashboard.json` as an asset to the dashboard https://claude.ai/artifact/MQTN8U9UEGWVmVTBMub4AP. Update the datasets meta, households, dishes, messages and followups so their `source.url` is the new file and `updated` is now, and give them titles without "Sample". Then delete the file they used before.
+> In the family-occasion-bot folder, run `npm run hc -- snapshot`. Upload `private/dashboard.json` as an asset to the dashboard https://claude.ai/artifact/MQTN8U9UEGWVmVTBMub4AP. Update the datasets meta, households, dishes, messages, followups and planned so their `source.url` is the new file and `updated` is now, and give them titles without "Sample". Then delete the file they used before.
 
 Everyone who can open the dashboard can read the whole file, texts included. It's private to you unless you share it.
 
