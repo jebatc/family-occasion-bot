@@ -98,6 +98,7 @@ From the host's own phone (with `TEXT_AS=me`, in the chat with yourself):
 | `remind` | Sends any reminders that are due right now (normally once a day, automatically) |
 | `#<n> ok` / `#<n> no` / `#<n> <answer>` | Answers a question the bot sent you, approves or turns down an offered dish |
 | `tell <name>: <message>` | Sends your own words to someone through the bot |
+| `errand <name>: <task> by <day>` | Adds an errand they've agreed to ("errand Clark: Pick up the wine by Wednesday"). Tom checks in daily until they say it's done, then tells you |
 | `ovens` | Each oven's lineup in time order, with temperatures |
 | `temps` / `temp <dish> <°F> [minutes]` | Asks guests for missing oven temperatures, or sets one for your own dish |
 | `changes` | The latest changes guests' messages made, and any messages it held back |

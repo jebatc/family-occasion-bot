@@ -439,6 +439,20 @@ async function handleHost(ctx: Ctx, text: string) {
     return sendAll(ctx, requestMessages(ctx, p.household, `You texted "request ${reqFor[1].trim()}"`), `${p.household}: `);
   }
   if (cmd === "temps") return sendAll(ctx, tempMessages(ctx));
+  // "errand Clark: Pick up the wine by Wednesday" adds an errand someone has agreed to; Tom follows up until it's done
+  const errand = text.trim().match(/^errand\s+([^:]+):\s*([\s\S]+?)\s+by\s+([^.]+?)\.?$/i);
+  if (errand) {
+    const who = errand[1].trim().toLowerCase();
+    const matches = config.people.filter((p) => p.phone && [p.name, p.name.split(" ")[0]].some((n) => n.toLowerCase() === who));
+    if (matches.length !== 1) return tellHost(db, host, matches.length ? `More than one "${errand[1].trim()}"; use their full name.` : `I don't have anyone called "${errand[1].trim()}" with a phone number. Add them to family.yaml first.`);
+    const [task, by, p] = [errand[2].trim(), errand[3].trim(), matches[0]];
+    const task1 = task[0].toUpperCase() + task.slice(1);
+    saveDish(config.eventFile, task1, { course: "Task", owner: p.name, status: "confirmed", done_by: by }, true);
+    logChange(db, host, "add_errand", `${task1} for ${p.name}, by ${by}`);
+    const first = p.name.split(" ")[0];
+    return tellHost(db, host, `Added: ${task1}, for ${p.name}, by ${by}. I'll check in with ${first} once a day (10 AM to 7 PM) until it's done, and text you when it is.`, "You texted errand");
+  }
+
   // "tell Robin: Great, see you then!" sends the host's own words to a guest through the bot
   const tell = text.trim().match(/^tell\s+([^:]+):\s*([\s\S]+)$/i);
   if (tell) {
@@ -471,7 +485,7 @@ async function handleHost(ctx: Ctx, text: string) {
       return tellHost(db, host, `Couldn't post: ${(err as Error).message}`);
     }
   }
-  return tellHost(db, host, `Commands: "status", "ovens", "changes", "remind", "rsvp", "request", "request <name>", "temps", "temp <dish> <°F> [minutes]", "tell <name>: <message>", "announce <message>", "#<n> ok", "#<n> no", "#<n> <your answer>".\n\n${openQuestions(db, config)}`);
+  return tellHost(db, host, `Commands: "status", "ovens", "changes", "remind", "rsvp", "request", "request <name>", "temps", "temp <dish> <°F> [minutes]", "tell <name>: <message>", "errand <name>: <task> by <day>", "announce <message>", "#<n> ok", "#<n> no", "#<n> <your answer>".\n\n${openQuestions(db, config)}`);
 }
 
 /** why: the reason Tom sends it, shown on the dashboard. */

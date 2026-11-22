@@ -802,3 +802,21 @@ test("an errand: Tom asks, nudges until it's done, and tells the host", async ()
   assert.equal(reminderMessages({ config, db, client: null as any }, nextDay).some((o) => o.phone === CLARK), false, "no more nudges");
   assert.match(statusText(config, db), /Wine Run 🏁/);
 });
+
+test("the host adds an errand by text, and Tom starts following up", async () => {
+  const CLARK = "15550000050";
+  writeFileSync(join(dir, "family.yaml"), readFileSync(join(dir, "family.yaml"), "utf8") + `  - name: Clark\n    phone: "${CLARK}"\n`);
+  reload();
+  await handleInbound({ config, db, client: null as any }, { waId: "w1", from: HOST, text: "errand Clark: pick up the wine by Wednesday, November 25" });
+  assert.equal(outbound(HOST)[0], "Added: Pick up the wine, for Clark, by Wednesday, November 25. I'll check in with Clark once a day (10 AM to 7 PM) until it's done, and text you when it is.");
+  reload();
+  const wine = findDishByName("Pick up the wine");
+  assert.deepEqual([wine?.owner, wine?.status, wine?.done_by, wine?.course], ["Clark", "confirmed", "Wednesday, November 25", "task"]);
+  assert.match(eventYaml(), /dish: Pick up the wine\n\s+course: Task\n\s+owner: Clark\n\s+status: Confirmed\n\s+done_by: Wednesday, November 25/);
+  const at = new Date(); at.setHours(11);
+  const nudge = reminderMessages({ config, db, client: null as any }, at).find((o) => o.phone === CLARK);
+  assert.match(String(nudge?.text), /^Hi Clark! Thanks for taking care of Pick up the wine \(by Wednesday, November 25\)/);
+
+  await handleInbound({ config, db, client: null as any }, { waId: "w2", from: HOST, text: "errand Dana: anything by Monday" });
+  assert.match(outbound(HOST).at(-1)!, /I don't have anyone called "Dana"/);
+});
