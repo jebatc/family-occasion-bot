@@ -2,9 +2,10 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import { DATA_DIR, loadConfig, phoneKey } from "./config.ts";
-import { openDb, lastMessageTs, scrubStoredText, forgetAllText } from "./db.ts";
-import { handleInbound, ovensText, sendReminders, statusText, eventDay, FORGET_AFTER_EVENT_MS } from "./agent.ts";
-import { useTransport } from "./transport.ts";
+import { openDb, lastMessageTs } from "./db.ts";
+import { ovensText, sendReminders, statusText, tom } from "./agent.ts";
+import { triage } from "./triage.ts";
+import { useTransport, sharesHostNumber } from "./transport.ts";
 import { whatsapp } from "./whatsapp.ts";
 import { imessage, checkMessages } from "./imessage.ts";
 
@@ -31,18 +32,14 @@ switch (cmd) {
     const eventBefore = readFileSync(config.eventFile);
     db.exec("BEGIN");
     try {
-      await handleInbound({ config, db, client: claude() }, { waId: `sim-${Date.now()}`, from, text: words.join(" ") });
+      const ctx = { config, db, client: claude() };
+      await triage({ project: tom(ctx), client: ctx.client, shared: false })({ waId: `sim-${Date.now()}`, from, text: words.join(" ") });
     } finally {
       db.exec("ROLLBACK");
       writeFileSync(config.eventFile, eventBefore);
     }
     break;
   }
-
-  case "forget":
-    forgetAllText(db);
-    console.log("Cleared the words of every stored message and question. RSVPs, dishes and the plan are kept.");
-    break;
 
   case "check":
     console.log(await checkMessages());
@@ -61,13 +58,9 @@ switch (cmd) {
       : imessage(asMe ? { host: config.host.phone, selfHandles } : {});
     if (asMe && kind !== "whatsapp") console.log(`Texting as you. Send commands by texting yourself (+${config.host.phone}).`);
     useTransport(transport);
-    scrubStoredText(db, config.host.phone); // anything an older version kept
-    const forgetIfOver = () => {
-      const day = eventDay(ctx.config);
-      if (day && Date.now() > +day + FORGET_AFTER_EVENT_MS) forgetAllText(db);
-    };
-    forgetIfOver();
     const ctx = { config, db, client: claude() };
+    // every text goes through triage, which refers to Tom only what's his to handle
+    const onText = triage({ project: tom(ctx), client: ctx.client, shared: sharesHostNumber() });
     let queue = Promise.resolve(); // one message at a time keeps per-guest history consistent
     await transport.start((msg) => {
       queue = queue
@@ -77,14 +70,14 @@ switch (cmd) {
           } catch (err) {
             console.error("Couldn't reload files, using the last good version:", (err as Error).message);
           }
-          return handleInbound(ctx, msg);
+          return onText(msg);
         })
         .catch((err) => console.error("inbound failed", err));
     }, lastMessageTs(db) ?? Date.now()); // catch up on anything newer than the last message the bot handled
     // daily nudges for missing RSVPs and unconfirmed dishes; checked every 30 minutes, queued with incoming messages
     setInterval(() => {
       queue = queue
-        .then(() => { try { ctx.config = loadConfig(); } catch {} scrubStoredText(db, config.host.phone); forgetIfOver(); return sendReminders(ctx); })
+        .then(() => { try { ctx.config = loadConfig(); } catch {} return sendReminders(ctx); })
         .catch((err) => console.error("reminders failed", err));
     }, 30 * 60_000);
     break;
@@ -94,7 +87,6 @@ switch (cmd) {
     console.log(`Usage: npm run hc -- <command>
   serve                       start answering texts (TRANSPORT=messages, the default, or whatsapp)
   check                       check the Mac can read and send Messages
-  forget                      clear the words of all stored messages (RSVPs and the plan are kept)
   status                      who's coming, who's bringing what, open questions
   ovens                       which dishes go in which oven, in time order
   simulate <name|host> "msg"  run a message through the agent without sending (DRY_RUN)

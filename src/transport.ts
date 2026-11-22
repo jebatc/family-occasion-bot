@@ -43,14 +43,14 @@ async function deliver(to: string, text: string, how: (t: Transport) => Promise<
   await how(active);
 }
 
-/**
- * keepText: store the words of this message. Only the bot's own texts to guests are kept (so it knows what it
- * asked them); messages to the host often quote guests, so only their fingerprint is stored.
- */
-export async function sendText(db: Db, to: string, body: string, keepText = true) {
+/** Sends a text and logs it in the project's database (with a fingerprint, so its echoes can be recognized). */
+export async function sendText(db: Db, to: string, body: string) {
   await deliver(to, body, (t) => t.send(to, body));
-  logMessage(db, to, "out", keepText ? body : "", undefined, textHash(body));
+  logMessage(db, to, "out", body, undefined, textHash(body));
 }
+
+/** Sends a text without logging it anywhere: triage's notices and replies. */
+export const sendOnly = (to: string, body: string) => deliver(to, body, (t) => t.send(to, body));
 
 /** True when announce can post to a group chat; otherwise it texts each person. */
 export const hasGroup = (groupName: string | undefined) =>

@@ -113,11 +113,13 @@ Family members can't make the bot run code or change things they shouldn't:
 
 ## Privacy
 
-Every text goes through triage first: the checks on who sent it, then a screening model that decides whether it's about the occasion. **Triage keeps nothing.** A text it turns away (off-topic, suspicious, from someone the assistant isn't talking with, or one screening couldn't judge) leaves only the fact that a message arrived, never its words.
+Two agents handle texts:
 
-- **Texts passed to the assistant are kept** as the conversation, along with its replies, so it can follow a back-and-forth. Your answers to its questions are kept too, so it can reuse them for other guests.
-- **Texts to you** (which can quote texts triage turned away) are stored only as a fingerprint, so the assistant can recognize its own messages.
-- **Clearing it:** two days after the event, every stored word is cleared automatically. Run `npm run hc -- forget` to clear them at any time. RSVPs, dishes and the plan are kept.
+- **Triage** sees every text first. It checks who sent it, whether it's someone the assistant is talking with, and, using a small screening model, whether it's about the occasion. It **stores nothing**. A text it turns away (off-topic, suspicious, from a stranger, or one it couldn't check) leaves no record, and neither do its own replies and notices to you. What it remembers while running stays in memory: texts it has already seen, hourly counts per person, and when you last texted someone.
+- **The assistant** (Tom) gets only the texts triage refers to it. It keeps those, its replies and your commands as its conversation history, like any app would.
+
+Triage is separate from Tom, so other agents can be added later with their own rules.
+
 - **Claude.** Each text the assistant handles is sent to Anthropic's API to be screened and answered. Anthropic doesn't train models on API data without your permission, and deletes API inputs and outputs within 30 days. Zero data retention (nothing stored once the response returns) is available from Anthropic on request, and covers the models this uses.
 - **Not controlled by the assistant:** your Mac's Messages history and iCloud keep every text as they always do, and your family's phones keep their side of the conversation.
 
@@ -163,8 +165,8 @@ By default (`TEXT_AS=me`) the assistant texts **from your own number**, through 
 
 Because it's your own number, the assistant keeps out of your personal texts:
 - **It only reads threads it started.** A text is looked at only if it's from someone in `family.yaml` whom the assistant has texted in the last 2 days. Everything else is never read, never sent to Claude and never recorded. Daily nudges keep the thread open with anyone it's still waiting on.
-- **Your own texts stay yours.** The assistant never sees the words of what you text people. It only learns that you texted someone, and when, so it can step back: if you've texted someone in the last 30 minutes, it doesn't reply to them. It still records an RSVP or dish answer from what they say, and tells you if they said yes.
-- **Only the occasion.** Within those threads, a screening model decides whether each text is about the gathering. Anything else gets no reply, and when it's unsure, it stays out.
+- **Your own texts stay yours.** Neither agent sees the words of what you text people. Triage only notes, in memory, that you texted someone and when, so the assistant can step back: if you've texted someone in the last 30 minutes, it doesn't reply to them. It still records an RSVP or dish answer from what they say, and tells you if they said yes.
+- **Only the occasion.** Within those threads, triage's screening model decides whether each text is about the gathering. Anything else never reaches the assistant, and when triage is unsure, it stays out.
 
 **Carrier limits.** iMessages go through Apple, not your carrier. SMS go out from your iPhone like ordinary texts. Carriers watch for spam-like volume, typically hundreds of near-identical texts quickly, and a family's invitations are far below that. The assistant also spaces out bulk sends by a few seconds. Expect a burst of a dozen or two texts when you send `rsvp`, then a trickle.
 
@@ -196,8 +198,9 @@ A MacBook still sleeps when its lid closes. To run it lid-closed while plugged i
 ## How it's built
 
 TypeScript on Node with no build step:
-- `src/agent.ts`: the conversation logic, built on Claude tool use
-- `src/guard.ts`: screening and limits
+- `src/triage.ts`: the stateless triage agent every text goes through, which refers texts to projects
+- `src/agent.ts`: Tom, the conversation logic built on Claude tool use, as a triage project
+- `src/guard.ts`: the screening prompt and limits
 - `src/transport.ts`: sending and receiving, whichever way the bot texts
 - `src/imessage.ts`: the Mac Messages app (AppleScript to send, its database to receive)
 - `src/whatsapp.ts`: the Baileys connection

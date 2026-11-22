@@ -2,22 +2,18 @@ import Anthropic from "@anthropic-ai/sdk";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { type Config, type Dish, type Person, phoneKey, saveDish, removeDish, findDish, titleCase } from "./config.ts";
-import { type Db, logMessage, logChange, keepText } from "./db.ts";
-import { LIMITS, WRITE_TOOLS, clip, leaksPhone, recentMessages, screenMessage } from "./guard.ts";
-import { type Inbound, sendText, postToGroup, hasGroup, pause, sharesHostNumber, textHash } from "./transport.ts";
+import { type Db, logMessage, logChange } from "./db.ts";
+import { LIMITS, WRITE_TOOLS, clip, leaksPhone } from "./guard.ts";
+import { sendText, postToGroup, hasGroup, pause, sharesHostNumber } from "./transport.ts";
+import type { Project, Referral } from "./triage.ts";
 
 const MODEL = "claude-opus-5-5";
 /** quiet: the host is texting this guest personally, so the agent records things but sends nothing to them. */
 export type Ctx = { config: Config; db: Db; client: Anthropic; quiet?: boolean };
 
-/** When the bot texts from the host's own number: how long after the host texts someone personally the bot stays out of it. */
-export const HANDOFF_MS = 30 * 60_000;
-/** When the bot texts from the host's own number, it only reads texts from people it has texted within this window. */
+/** When Tom texts from the host's own number, triage only refers texts from people he has texted within this window. */
 export const OPEN_THREAD_MS = 2 * 24 * 3600_000;
-// texts to the host quote guests, so their words are never stored (see sendText)
-const tellHost = (db: Db, phone: string, text: string) => sendText(db, phone, text, false);
-// messages the host typed personally are logged as outgoing with the transport's message id; the bot's own have none
-const BY_HOST = "(direction = 'out' AND wa_id IS NOT NULL)";
+const tellHost = sendText;
 
 const tools: Anthropic.Beta.BetaTool[] = [
   {
@@ -213,13 +209,13 @@ function householdRsvp(db: Db, members: Person[]) {
     .get(...members.map((m) => m.phone));
 }
 
-/** The conversation: texts triage passed to the bot and the bot's own replies (nothing else is kept), then the new message. */
+/** The conversation: texts triage referred to Tom and his replies, then the new message. */
 function guestContext({ config, db }: Ctx, guest: Person, text: string, waId: string) {
   const mine = config.menu.filter((d) => owns(d, guest));
   const members = households(config).get(guest.household)!;
   const rsvp = householdRsvp(db, members);
   const history = db
-    .prepare("SELECT direction, body FROM messages WHERE phone = ? AND body != '' AND wa_id IS NOT ? ORDER BY id DESC LIMIT 20")
+    .prepare("SELECT direction, body FROM messages WHERE phone = ? AND wa_id IS NOT ? ORDER BY id DESC LIMIT 20")
     .all(guest.phone, waId)
     .reverse();
   return `Guest: ${guest.name}
@@ -228,7 +224,7 @@ Dietary: ${guest.dietary ?? "none noted"}
 Your dishes and day-of tasks: ${mine.map((d) => `${detailed(d)} (${d.course === "task" ? "task, " : ""}${d.status ?? "proposed"}${d.fallback ? `; falls back to ${d.fallback} if they can't` : ""})`).join("; ") || "none"}
 Household RSVP: ${guest.household === config.host.household ? `hosting (lives with ${config.host.name}; don't ask them to RSVP)` : rsvp ? JSON.stringify(rsvp) : "not yet"}
 
-Conversation so far (oldest first; only texts about the gathering are kept):
+Conversation so far (oldest first):
 ${history.map((m) => `${m.direction === "in" ? guest.name : "You"}: ${m.body}`).join("\n") || "(none)"}
 
 Their new message, the one to answer:
@@ -543,11 +539,8 @@ function tempMessages({ config }: Ctx): Outgoing[] {
 
 const DAY = 24 * 3600_000;
 
-/** Two days after the event, even the bot's own texts are cleared: nothing is left to follow up. */
-export const FORGET_AFTER_EVENT_MS = 2 * 24 * 3600_000;
-
 /** The event day, from event.date ("Thursday, November 26") and the year in the title. */
-export function eventDay(config: Config) {
+function eventDay(config: Config) {
   const year = String(config.event.title).match(/\d{4}/)?.[0] ?? String(new Date().getFullYear());
   const d = new Date(`${String(config.event.date).replace(/^\w+,\s*/, "")} ${year}`);
   return Number.isNaN(+d) ? undefined : d;
@@ -681,69 +674,50 @@ export function statusText(config: Config, db: Db) {
     `\n📝 not asked yet · ⏳ asked · ✅ confirmed · 💡 offered, needs your ok\n\n${openQuestions(db, config)}`;
 }
 
-/** Did the bot itself send a text with this fingerprint to this number lately? Tells its echoes from the host's own texts. */
-const botSent = (db: Db, phone: string, hash: string) =>
-  !!db.prepare("SELECT 1 FROM messages WHERE phone = ? AND direction = 'out' AND wa_id IS NULL AND hash = ? AND ts > ?").get(phone, hash, Date.now() - 24 * 3600_000);
-
-/** The host texted this guest personally within the handoff window. Only the time is known, never the words. */
-const hostTalking = (db: Db, phone: string, now = Date.now()) =>
-  !!db.prepare(`SELECT 1 FROM messages WHERE phone = ? AND ${BY_HOST} AND ts > ?`).get(phone, now - HANDOFF_MS);
-
-/** The bot texted this person recently, so it may be waiting on an answer. */
+/** Tom texted this person recently, so he may be waiting on an answer. */
 const openThread = (db: Db, phone: string, now = Date.now()) =>
-  !!db.prepare("SELECT 1 FROM messages WHERE phone = ? AND direction = 'out' AND wa_id IS NULL AND ts > ?").get(phone, now - OPEN_THREAD_MS);
+  !!db.prepare("SELECT 1 FROM messages WHERE phone = ? AND direction = 'out' AND ts > ?").get(phone, now - OPEN_THREAD_MS);
 
-/**
- * Handles one text. Triage (the checks and the screening model) is stateless: a text it turns away leaves only the
- * fact that a message arrived, never its words. A text it passes to the bot is kept, as part of the conversation.
- */
-export async function handleInbound(ctx: Ctx, msg: Inbound) {
+/** Tom as a project for triage: what he knows about people, and how he handles what triage refers to him. */
+export function tom(ctx: Ctx): Project {
+  const { db } = ctx;
+  return {
+    name: ctx.config.persona.name,
+    hostPhone: () => ctx.config.host.phone,
+    hostName: () => ctx.config.host.name,
+    person: (phone) => ctx.config.people.find((p) => p.phone === phone),
+    listeningTo: (phone) => openThread(db, phone),
+    conversation: (phone) =>
+      db.prepare("SELECT direction, body FROM messages WHERE phone = ? ORDER BY id DESC LIMIT 5").all(phone).reverse()
+        .map((r) => ({ direction: String(r.direction), body: String(r.body) })),
+    sent: (phone, hash) =>
+      !!db.prepare("SELECT 1 FROM messages WHERE phone = ? AND direction = 'out' AND hash = ? AND ts > ?").get(phone, hash, Date.now() - 24 * 3600_000),
+    offTopicReply: () => {
+      const { persona, host } = ctx.config;
+      return `I'm ${persona.name}, ${host.name}'s Thanksgiving helper, so I can only help with Thanksgiving plans. ${persona.signoff ?? ""}`.trim();
+    },
+    handle: (r) => handleReferral(ctx, r),
+  };
+}
+
+/** A text triage referred to Tom: a host command, or a guest's text about the gathering. */
+export async function handleReferral(ctx: Ctx, r: Referral) {
   const { config, db } = ctx;
-  const from = phoneKey(msg.from);
-  const shared = sharesHostNumber();
-  if (msg.mine) {
-    // the host texting someone personally: note when (so the bot steps back), unless it's the bot's own text
-    if (shared && !(msg.hash && botSent(db, from, msg.hash))) logMessage(db, from, "out", "", msg.waId);
-    return;
-  }
-  // the bot's replies to the host land in the host's chat with themselves; skip them
-  if (shared && from === config.host.phone && botSent(db, from, textHash(msg.text))) return;
-  const guest = config.people.find((p) => p.phone === from);
-  // on the host's own number, only people the bot is talking with are its business; nothing else is read or kept
-  if (shared && from !== config.host.phone && (!guest || !openThread(db, from))) return;
-  if (!logMessage(db, from, "in", "", msg.waId)) return; // duplicate delivery
-  if (from === config.host.phone) return handleHost(ctx, msg.text);
-  if (!guest) return tellHost(db, config.host.phone, `Message from unknown ${from ? `number +${from}` : msg.from}: ${msg.text}`);
-  // on the host's own number they already see the text in their thread, so notices don't repeat it
-  const quote = (n = LIMITS.field) => (shared ? "" : `: "${clip(msg.text, n)}"`);
+  if (!logMessage(db, r.from, "in", r.text, r.waId)) return; // already handled
+  if (r.fromHost) return handleHost(ctx, r.text);
+  const guest = config.people.find((p) => p.phone === r.from);
+  if (!guest) return;
   try {
-    const sent = recentMessages(db, from);
-    if (sent > LIMITS.messagesPerHour) {
-      if (sent === LIMITS.messagesPerHour + 1)
-        await tellHost(db, config.host.phone, `⚠️ ${guest.name} has sent over ${LIMITS.messagesPerHour} messages this hour, so I've paused auto-replies to them for now${quote(200)}`);
-      return;
-    }
-    // only relevant messages reach the agent and its tools
-    const kept = db.prepare("SELECT direction, body FROM messages WHERE phone = ? AND body != '' ORDER BY id DESC LIMIT 5").all(from).reverse();
-    const history = [...kept.map((r) => ({ direction: String(r.direction), body: String(r.body) })), { direction: "in", body: msg.text }];
-    const { verdict, reason } = await screenMessage(ctx.client, guest, history, shared ? config.host.name : undefined);
-    if (verdict === "off_topic" && shared) return; // everyday texts to the host: not the bot's to answer
-    if (verdict === "off_topic") return sendText(db, from, `I'm ${config.persona.name}, ${config.host.name}'s Thanksgiving helper, so I can only help with Thanksgiving plans. ${config.persona.signoff ?? ""}`.trim(), false); // triage output: not kept
-    if (verdict === "suspicious") {
-      logChange(db, from, "held_message", ""); // that a message was held, not what it said
-      return tellHost(db, config.host.phone, `⚠️ Held a message from ${guest.name} without replying (${clip(reason, 150)})${shared ? ". It's in your thread with them." : `:\n"${clip(msg.text)}"`}\nIf it needs an answer: tell ${guest.name.split(" ")[0]}: <your message>`);
-    }
-    // event-driven: a yes gets the bot's confirmation reply first, then that household's dish requests
-    keepText(db, msg.waId, msg.text); // passed triage: now part of the conversation with the bot
     // the host is mid-conversation with them: record what they say, but leave the replying to the host
-    if (shared && hostTalking(db, from)) {
-      if (await runGuestAgent({ ...ctx, quiet: true }, guest, msg.text, msg.waId))
+    if (r.quiet) {
+      if (await runGuestAgent({ ...ctx, quiet: true }, guest, r.text, r.waId))
         await tellHost(db, config.host.phone, `${guest.name} said yes while you were texting them, so I've recorded it. Text "request ${guest.name.split(" ")[0]}" when you'd like me to send their dish requests.`);
       return;
     }
-    if (await runGuestAgent(ctx, guest, msg.text, msg.waId)) await followUpRequests(ctx, guest);
+    // event-driven: a yes gets the bot's confirmation reply first, then that household's dish requests
+    if (await runGuestAgent(ctx, guest, r.text, r.waId)) await followUpRequests(ctx, guest);
   } catch (err) {
     console.error(`agent failed for ${guest.name}`, err);
-    await tellHost(db, config.host.phone, `⚠️ I hit an error answering ${guest.name}${quote()}. Please reply to them directly.`);
+    await tellHost(db, config.host.phone, `⚠️ I hit an error answering ${guest.name}${sharesHostNumber() ? "" : `: "${r.text}"`}. Please reply to them directly.`);
   }
 }

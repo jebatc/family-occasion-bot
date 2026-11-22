@@ -1,9 +1,8 @@
 import type Anthropic from "@anthropic-ai/sdk";
-import type { Config, Person } from "./config.ts";
-import type { Db } from "./db.ts";
+import type { Config } from "./config.ts";
 
 export const LIMITS = {
-  messagesPerHour: 20, // per guest; beyond this the bot stops auto-replying for the hour
+  messagesPerHour: 20, // per person; beyond this triage stops referring their texts for the hour
   writesPerMessage: 4, // data changes one incoming message may cause
   openProposals: 2, // new-dish offers per guest still waiting on the host
   field: 300, // characters kept from any text a guest's message puts into the plan
@@ -36,7 +35,7 @@ When unsure, choose off_topic: ${host} will see the message on their own phone e
 
 /** Asks a small model whether the guest's newest message should be answered. Throws on API errors: the caller holds the message. */
 /** hostName: set when the assistant texts from the host's own number, so most of what arrives is ordinary personal texting. */
-export async function screenMessage(client: Anthropic, guest: Person, history: { direction: string; body: string }[], hostName?: string): Promise<Verdict> {
+export async function screenMessage(client: Anthropic, guest: { name: string }, history: { direction: string; body: string }[], hostName?: string): Promise<Verdict> {
   const transcript = history.map((m) => `${m.direction === "in" ? guest.name : "Assistant"}: ${clip(m.body, 500)}`).join("\n");
   const res = await client.messages.create({
     model: SCREEN_MODEL,
@@ -72,7 +71,3 @@ export function leaksPhone(text: string, config: Config) {
   if ([config.host, ...config.people].some((p) => p.phone && digits.includes(p.phone.slice(-10)))) return true;
   return /(\+?\d[\d\s().-]{8,}\d)/.test(text) && /\d{3}\D{0,3}\d{3}\D{0,3}\d{4}/.test(text);
 }
-
-/** How many messages this guest sent in the last hour. */
-export const recentMessages = (db: Db, phone: string) =>
-  Number(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE phone = ? AND direction = 'in' AND ts > ?").get(phone, Date.now() - 3600_000)?.n ?? 0);

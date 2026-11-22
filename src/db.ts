@@ -20,25 +20,7 @@ export function openDb(path: string): Db {
   return db;
 }
 
-/** Clears stored words of texts to the host (they can quote messages triage turned away). */
-export function scrubStoredText(db: Db, hostPhone: string) {
-  db.prepare("UPDATE messages SET body = '' WHERE phone IN (?, 'group') AND body != ''").run(hostPhone);
-}
-
-/** Triage passed this message to the bot, so its words may now be kept. */
-export function keepText(db: Db, waId: string, body: string) {
-  db.prepare("UPDATE messages SET body = ? WHERE wa_id = ? AND direction = 'in'").run(body, waId);
-}
-
-/** Clears every stored word of every message and question; RSVPs and the plan are kept. */
-export function forgetAllText(db: Db) {
-  db.exec("UPDATE messages SET body = ''; UPDATE escalations SET question = '', suggested = NULL, answer = NULL; UPDATE changes SET detail = '' WHERE action = 'held_message'");
-}
-
-/**
- * Records that a message happened. Returns false when this message id was already logged (redeliveries).
- * body is stored as given, so callers pass "" for anything whose words shouldn't be kept.
- */
+/** Logs a message. Returns false when this message id was already logged (redeliveries). */
 export function logMessage(db: Db, phone: string, direction: "in" | "out", body: string, waId?: string, hash?: string) {
   const r = db
     .prepare("INSERT OR IGNORE INTO messages (wa_id, phone, direction, body, ts, hash) VALUES (?, ?, ?, ?, ?, ?)")
