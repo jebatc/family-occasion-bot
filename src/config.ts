@@ -14,7 +14,8 @@ export type Dish = {
   quantity?: number | string; // e.g. 2 pecan pies
   course?: string; // appetizer, main, side, dessert, drink, or "task" for a day-of job (not something to bring)
   owner?: string | string[] | null; // a name from family.yaml (or the host), or a list for shared tasks; empty = needs an owner
-  status?: "proposed" | "requested" | "confirmed"; // proposed = not asked yet; requested = asked; confirmed = owner said yes
+  status?: "proposed" | "requested" | "confirmed" | "done"; // proposed = not asked yet; requested = asked; confirmed = owner said yes; done = an errand finished
+  done_by?: string; // makes it an errand to finish before the day, e.g. "Wednesday, November 25"; Tom nudges until it's done
   confirmation?: string; // when and how the owner confirmed
   declined_by?: string; // last person who said no; the dish goes back to proposed with no owner
   fallback?: string; // who takes it if the owner says no (instead of leaving it unowned)

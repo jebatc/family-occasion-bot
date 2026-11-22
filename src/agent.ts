@@ -36,12 +36,12 @@ const tools: Anthropic.Beta.BetaTool[] = [
   },
   {
     name: "record_contribution",
-    description: "Record the guest's yes or no on a dish they were asked to bring (one listed under 'Your dishes'). Call once per dish.",
+    description: "Record the guest's yes or no on a dish they were asked to bring (one listed under 'Your dishes'), or, for an errand, that they've done it. Call once per dish.",
     input_schema: {
       type: "object",
       properties: {
         dish: { type: "string", description: "The dish name exactly as in the menu" },
-        status: { type: "string", enum: ["confirmed", "declined"] },
+        status: { type: "string", enum: ["confirmed", "declined", "done"], description: "done only for an errand (it has a 'done by'), once they say they've finished it" },
         note: { type: "string", description: "Details they gave with the yes, e.g. how much, bringing it ready to bake, needs the oven at 1:00" },
       },
       required: ["dish", "status"],
@@ -127,6 +127,7 @@ Rules:
 - Recording the guest's own RSVP, or their yes/no on a dish they were asked to bring, needs no escalation.
 - When asking someone to bring a dish, ${host.name} is happy to send the recipe she uses, or they can use their own. If they want the recipe, call send_recipe.
 - If a guest offers to bring something new, call propose_dish and tell them you'll check with ${host.name}. Don't say it's on the menu until she approves.
+- An errand (marked "to do by") is something to get done before the day, like picking something up. Their yes is confirmed; once they say it's done (picked up, bought, dropped off), record it as done and thank them. Until then it isn't done, even if they've agreed.
 - If one of the guest's confirmed dishes has an oven planned but no temperature, ask what temperature and how long it needs when it fits the conversation, and save the answer with record_oven_needs.
 - Family dietary needs: ${dietaryNeeds(config) || "none"}. Don't ask about these when a guest offers a new dish; ${host.name} decides first, and the bot asks afterward. When a guest tells you a dish's dietary details (e.g. "yes, it's gluten-free"), save them with set_dish_dietary.
 - Never share anyone's phone number or private details.
@@ -221,7 +222,7 @@ function guestContext({ config, db }: Ctx, guest: Person, text: string, waId: st
   return `Guest: ${guest.name}
 Household: ${guest.household} (${members.map((m) => m.name).join(", ")}); an RSVP from any of them counts for the household
 Dietary: ${guest.dietary ?? "none noted"}
-Your dishes and day-of tasks: ${mine.map((d) => `${detailed(d)} (${d.course === "task" ? "task, " : ""}${d.status ?? "proposed"}${d.fallback ? `; falls back to ${d.fallback} if they can't` : ""})`).join("; ") || "none"}
+Your dishes and day-of tasks: ${mine.map((d) => `${detailed(d)} (${d.done_by ? `errand, to do by ${d.done_by}, ` : d.course === "task" ? "task, " : ""}${d.status ?? "proposed"}${d.fallback ? `; falls back to ${d.fallback} if they can't` : ""})`).join("; ") || "none"}
 Household RSVP: ${guest.household === config.host.household ? `hosting (lives with ${config.host.name}; don't ask them to RSVP)` : rsvp ? JSON.stringify(rsvp) : "not yet"}
 
 Conversation so far (oldest first):
@@ -265,9 +266,16 @@ async function runTool(ctx: Ctx, guest: Person, name: string, input: any) {
       await settleRsvpTasks(ctx, guest, input.status);
       return "recorded";
     case "record_contribution": {
-      if (!["confirmed", "declined"].includes(input.status)) return "error: status must be confirmed or declined";
+      if (!["confirmed", "declined", "done"].includes(input.status)) return "error: status must be confirmed, declined or done";
       const dish = findDish(ctx.config, String(input.dish));
       if (!dish || !owns(dish, guest)) return "error: that isn't one of this guest's dishes";
+      if (input.status === "done") {
+        if (!dish.done_by) return "error: only errands (with a 'done by') can be done; use confirmed";
+        const when = new Date().toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+        saveDish(ctx.config.eventFile, dish.dish, { status: "done", confirmation: `done ${when}${input.note ? `: ${clip(input.note)}` : ""}` });
+        await tellHost(ctx.db, ctx.config.host.phone, `✅ ${guest.name} has done it: ${dish.dish}${input.note ? ` (${clip(input.note, 120)})` : ""}.`, `${guest.name} finished an errand`);
+        return "recorded as done; thank them";
+      }
       if (input.status === "confirmed") {
         const when = new Date().toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
         saveDish(ctx.config.eventFile, dish.dish, { status: "confirmed", confirmation: `${when}${input.note ? `: ${clip(input.note)}` : ""}` });
@@ -509,9 +517,12 @@ function requestMessages({ config, db }: Ctx, household?: string, why = "Their h
     if (!p.phone || !dishes.length) return [];
     const bring = dishes.filter((d) => d.course !== "task");
     const help = dishes.filter((d) => d.course === "task");
+    const errand = dishes.length === 1 && dishes[0].done_by ? dishes[0] : undefined;
     const asked = (d: Dish) => d.ask_as ?? detailed(d);
     const list = (ds: Dish[]) => ds.map((d) => `• ${asked(d)}`).join("\n");
-    const ask = dishes.length === 1
+    const ask = errand
+      ? `could you please take care of this by ${errand.done_by}? ${asked(errand)}. I'll check in until it's done.`
+      : dishes.length === 1
       ? bring.length ? `could you please bring ${bring[0].ask_as ?? `${label(bring[0])}${bring[0].description ? ` (${bring[0].description})` : ""}`}?` : `could you help on the day with this? ${asked(help[0])}.`
       : [bring.length && `could you please bring:\n${list(bring)}`, help.length && `${bring.length ? "And on the day, could you help with" : "could you help on the day with"}:\n${list(help)}`]
           .filter(Boolean).join("\n") + "\n"; // the list ends the line
@@ -576,6 +587,18 @@ function nudgeCandidates({ config, db }: Ctx): Outgoing[] {
     const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
     const reply = names.length === 1 ? "Reply YES to confirm, or send me any questions." : "Reply YES if you can do them all, tell me which ones work, or send me any questions.";
     out.push({ ...p, text: `Hi ${first(p)}! Just checking in on ${list} for ${title}. ${reply} ${persona.signoff ?? ""}`.trim(), why: `Daily nudge: asked to bring ${waiting.map((d) => d.dish).join(", ")}, not confirmed yet` });
+  }
+  // errands they agreed to: a nudge each day until they say it's done
+  for (const p of config.people) {
+    if (!p.phone || out.some((o) => o.phone === p.phone)) continue;
+    const errands = config.menu.filter((d) => owns(d, p) && d.done_by && d.status === "confirmed");
+    if (!errands.length) continue;
+    const list = errands.map((d) => `${d.ask_as ?? label(d)} (by ${d.done_by})`).join(" and ");
+    out.push({
+      ...p,
+      text: `Hi ${first(p)}! Thanks for taking care of ${list} for ${title}. Have you had a chance to do it yet? Reply DONE once it's done, or let me know if anything's changed. ${persona.signoff ?? ""}`.trim(),
+      why: `Daily nudge: agreed to ${errands.map((d) => d.dish).join(", ")}, not done yet`,
+    });
   }
   return out;
 }
@@ -660,7 +683,7 @@ export function ovensText(config: Config) {
   return `Ovens on the day\n\n${lines.join("\n\n") || "No ovens listed in event.yaml."}`;
 }
 
-const ICONS: Record<string, string> = { proposed: "📝", requested: "⏳", confirmed: "✅" };
+const ICONS: Record<string, string> = { proposed: "📝", requested: "⏳", confirmed: "✅", done: "🏁" };
 
 export function statusText(config: Config, db: Db) {
   let total = 0;
@@ -681,7 +704,7 @@ export function statusText(config: Config, db: Db) {
   const open = config.menu.filter((d) => !ownerNames(d).length).map((d) => d.dish + (d.declined_by ? ` (${d.declined_by} declined)` : ""));
   return `${config.event.title}: ${total} coming\n${lines.join("\n")}${open.length ? `\n\nNeeds an owner: ${open.join(", ")}` : ""}` +
     (myTemps.length ? `\nOven temps still needed from you: ${myTemps.join(", ")} (text "temp <dish> <°F> [minutes]")` : "") +
-    `\n📝 not asked yet · ⏳ asked · ✅ confirmed · 💡 offered, needs your ok\n\n${openQuestions(db, config)}`;
+    `\n📝 not asked yet · ⏳ asked · ✅ confirmed · 🏁 errand done · 💡 offered, needs your ok\n\n${openQuestions(db, config)}`;
 }
 
 /** Tom texted this person recently, so he may be waiting on an answer. */
@@ -739,7 +762,8 @@ export function snapshotData(ctx: Ctx, now = new Date()) {
   const last = (phone: string, direction: "in" | "out") =>
     db.prepare("SELECT MAX(ts) AS ts FROM messages WHERE phone = ? AND direction = ?").get(phone, direction)?.ts;
   const pending = awaitingHost(db);
-  const statusOf = (d: Dish) => (pending.has(d.dish.toLowerCase()) ? "offered" : d.status ?? "proposed");
+  const statusOf = (d: Dish) =>
+    pending.has(d.dish.toLowerCase()) ? "offered" : d.done_by && d.status === "confirmed" ? "agreed" : d.status ?? "proposed";
 
   const households_ = [...households(config)].map(([name, members]) => {
     const isHost = name === config.host.household;
@@ -760,7 +784,7 @@ export function snapshotData(ctx: Ctx, now = new Date()) {
 
   const dishes = config.menu.map((d) => ({
     dish: d.dish,
-    course: d.course === "task" ? "Day-of task" : d.course ? d.course[0].toUpperCase() + d.course.slice(1) : "",
+    course: d.done_by ? `Errand, by ${d.done_by}` : d.course === "task" ? "Day-of task" : d.course ? d.course[0].toUpperCase() + d.course.slice(1) : "",
     owner: ownerNames(d).join(", ") || "Needs an owner",
     status: ownerNames(d).length ? statusOf(d) : "needs owner",
     oven: d.oven ? `${d.oven.name}${d.oven.when ? ` ${d.oven.when}` : ""}${d.oven.temp ? ` · ${d.oven.temp}` : " · temp needed"}` : "",
@@ -795,6 +819,8 @@ export function snapshotData(ctx: Ctx, now = new Date()) {
   }
   for (const p of config.people.filter((p) => p.phone)) {
     const waiting = config.menu.filter((d) => owns(d, p) && d.status === "requested");
+    const errands = config.menu.filter((d) => owns(d, p) && d.done_by && d.status === "confirmed");
+    if (errands.length) followups.push({ for: "Tom", kind: "Waiting on an errand", person: p.name, detail: errands.map((d) => `${d.dish} (by ${d.done_by})`).join(", "), reply: "", since: iso(last(p.phone, "out")), next: nextNudge(p.phone) });
     if (waiting.length) followups.push({ for: "Tom", kind: "Waiting on a dish", person: p.name, detail: waiting.map((d) => d.dish).join(", "), reply: "", since: iso(last(p.phone, "out")), next: nextNudge(p.phone) });
   }
   for (const d of config.menu.filter((d) => needsTemp(d) && d.status === "confirmed" && !owns(d, config.host)))

@@ -81,6 +81,7 @@ Pick the occasion with `HOLIDAY` and `YEAR` in `.env` (for example `HOLIDAY=than
 | `fallback` | Who takes the dish if the owner says no |
 | `confirm_on_rsvp` | For tasks that come with attending: never asked about, confirmed by the household's yes |
 | `course: Task` | A day-of job ("Glaze the carrots at 1:33") rather than something to bring |
+| `done_by` | Makes it an errand to finish before the day ("Pick up the wine", `done_by: Wednesday, November 25`). Tom asks by that date, nudges daily until they say it's done, marks it Done and tells you |
 
 `examples/data/` has a small, complete example to copy from.
 
