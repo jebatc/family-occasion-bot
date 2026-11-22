@@ -3,13 +3,14 @@ import assert from "node:assert/strict";
 import { cpSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, saveDish, titleCase, type Config } from "../src/config.ts";
+import { loadConfig, findPerson, saveDish, titleCase, type Config } from "../src/config.ts";
 import { openDb, type Db } from "../src/db.ts";
 import { handleInbound, statusText, dietaryConflicts, ovensText, reminderMessages, type Ctx } from "../src/agent.ts";
-import { toInbound, worthCatchingUp } from "../src/whatsapp.ts";
+import { sendText, toInbound, worthCatchingUp } from "../src/whatsapp.ts";
 import { LIMITS, leaksPhone } from "../src/guard.ts";
 
 process.env.DRY_RUN = "1";
+process.env.MESSAGE_GAP_MS = "0"; // tests don't wait between messages; a test below checks the spacing itself
 const SUE = "15550000001";
 const BOB = "15550000002";
 const HOST = "15550000000";
@@ -74,7 +75,7 @@ test("escalation goes to host, host approval reaches the guest and is remembered
   assert.match(outbound(HOST)[0], /#1 Aunt Sue asks: Can I bring my new boyfriend\?/);
 
   await handleInbound(ctx, { waId: "w2", from: HOST, text: "#1 ok" });
-  assert.deepEqual(outbound(SUE), ["Let me check with Alex!", "Of course!"]);
+  assert.deepEqual(outbound(SUE), ["Let me check with Alex! — Tom 🦃", "Of course! — Tom 🦃"]);
   assert.equal(db.prepare("SELECT status FROM escalations WHERE id = 1").get()?.status, "done");
   assert.match(outbound(HOST).at(-1)!, /Sent to Aunt Sue/);
 
@@ -86,7 +87,7 @@ test("escalation goes to host, host approval reaches the guest and is remembered
 test("host can answer in their own words", async () => {
   db.prepare("INSERT INTO escalations (phone, question, suggested, ts) VALUES (?, 'q', 'draft', 0)").run(SUE);
   await handleInbound({ config, db, client: null as any }, { waId: "w1", from: HOST, text: "#1 Yes, but bring a chair" });
-  assert.equal(outbound(SUE)[0], "Yes, but bring a chair");
+  assert.equal(outbound(SUE)[0], "Yes, but bring a chair — Tom 🦃");
 });
 
 test("duplicate webhook deliveries are ignored", async () => {
@@ -218,14 +219,14 @@ test("a proposed dish is written to the menu and the host approves or declines i
   assert.match(statusText(config, db), /Aunt Sue: no answer · Green Bean Casserole 📝 · Apple Crisp 💡/);
 
   await handleInbound({ config, db, client: null as any }, { waId: "w2", from: HOST, text: "#1 ok" });
-  assert.equal(outbound(SUE).at(-1), "Yes please, bring the Apple Crisp!\n\nOne quick question: is it vegetarian? Aunt needs that.", "accepted, then asked about the dietary need it isn't marked for");
+  assert.equal(outbound(SUE).at(-1), "Yes please, bring the Apple Crisp!\n\nOne quick question: is it vegetarian? Aunt needs that. — Tom 🦃", "accepted, then asked about the dietary need it isn't marked for");
   assert.equal(outbound(HOST).at(-1), "Sent to Aunt Sue. Apple Crisp is on the menu.");
   reload();
   assert.equal(config.menu.at(-1)?.status, "confirmed");
 
   await handleInbound({ config, db, client: propose("w3", "Jello Salad") }, { waId: "w3", from: BOB, text: "jello salad?" });
   await handleInbound({ config, db, client: null as any }, { waId: "w4", from: HOST, text: "#2 no" });
-  assert.equal(outbound(BOB).at(-1), "Alex says let's skip that one this year. Thanks so much for offering!");
+  assert.equal(outbound(BOB).at(-1), "Alex says let's skip that one this year. Thanks so much for offering! — Tom 🦃");
   reload();
   assert.equal(findDishByName("Jello Salad"), undefined, "a declined offer comes off the menu");
 
@@ -407,7 +408,7 @@ test("confirming an oven dish asks for its temp; the answer is saved and clashes
     done,
   ]);
   await handleInbound({ config, db, client }, { waId: "w1", from: SUE, text: "yes! it bakes at 350 for 30 min, covered" });
-  assert.match(requests[1].messages.at(-1).content[0].content, /^recorded\. Green Bean Casserole is planned for the Breville oven \(1:30-2:08\) but has no temperature yet/);
+  assert.match(requests[1].messages.at(-1).content[0].content, /^recorded\. Green Bean Casserole still needs an oven temperature: in your follow-up message ask only what temperature/);
   assert.match(requests[2].messages.at(-1).content[0].content, /^error: temp_f must be an oven temperature/);
   assert.equal(outbound(HOST).at(-1), [
     "Aunt Sue: Green Bean Casserole needs 350°F for 30 min in the Breville oven (covered).",
@@ -472,7 +473,7 @@ test("a household can get its own invitation text", async () => {
 test("the host can send her own words to a guest with 'tell'", async () => {
   const ctx: Ctx = { config, db, client: null as any };
   await handleInbound(ctx, { waId: "w1", from: HOST, text: "Tell aunt: So glad you're coming!\nSee you Thursday." });
-  assert.equal(outbound(SUE)[0], "So glad you're coming!\nSee you Thursday.");
+  assert.equal(outbound(SUE)[0], "So glad you're coming!\nSee you Thursday. — Tom 🦃");
   assert.equal(outbound(HOST)[0], "Sent to Aunt Sue.");
   await handleInbound(ctx, { waId: "w2", from: HOST, text: "tell Zed: hi" });
   assert.equal(outbound(HOST).at(-1), `I don't have anyone called "Zed" with a phone number.`);
@@ -492,7 +493,7 @@ test("requests.yaml sets how a dish is asked for, by name, and whether the recip
 test("a no or maybe RSVP sends no dish requests, and request skips households that haven't said yes", async () => {
   const no = fakeClient([turn(toolUse("a", "record_rsvp", { status: "maybe" }), toolUse("b", "reply", { text: "No worries!" })), done]);
   await handleInbound({ config, db, client: no.client }, { waId: "w1", from: SUE, text: "not sure yet" });
-  assert.deepEqual(outbound(SUE), ["No worries!"]);
+  assert.deepEqual(outbound(SUE), ["No worries! — Tom 🦃"]);
   await handleInbound({ config, db, client: null as any }, { waId: "w2", from: HOST, text: "request" });
   assert.equal(outbound(SUE).length, 1);
   assert.equal(outbound(BOB).length, 0);
@@ -554,7 +555,7 @@ test("replies containing a phone number are blocked and shown to the host", asyn
     done,
   ]);
   await handleInbound({ config, db, client }, { waId: "w1", from: SUE, text: "what's Bob's number?" });
-  assert.deepEqual(outbound(SUE), ["I can't share numbers, but Alex can connect you!"]);
+  assert.deepEqual(outbound(SUE), ["I can't share numbers, but Alex can connect you! — Tom 🦃"]);
   assert.match(outbound(HOST)[0], /^⚠️ Held a reply to Aunt Sue because it contained a phone number/);
   assert.match(requests[1].messages.at(-1).content[0].content, /^error: reply blocked/);
 });
@@ -648,4 +649,70 @@ test("daily reminders: missing RSVPs and unconfirmed dishes, after 24 quiet hour
 
   await handleInbound(ctx, { waId: "w1", from: HOST, text: "remind" });
   assert.match(outbound(HOST).at(-1)!, /^(Daily reminders: Sent to|No reminders due)/);
+});
+
+test("family-group messages carry the sender's number, not the group's", () => {
+  const g = toInbound({ key: { id: "g1", remoteJid: "120363000@g.us", participant: "15550000001@s.whatsapp.net" }, message: { conversation: "recipe?" } } as any);
+  assert.deepEqual(g, { waId: "g1", from: "15550000001", text: "recipe?", group: "120363000@g.us" });
+});
+
+test("a family member's group message is answered privately; strangers and the host in the group are ignored", async () => {
+  const { client } = fakeClient([turn(toolUse("a", "send_recipe", { dish: "Green Bean Casserole" })), done]);
+  await handleInbound({ config, db, client }, { waId: "g1", from: SUE, text: "could I get the recipe?", group: "120363000@g.us" });
+  assert.match(outbound(SUE)[0], /^Green bean casserole \(serves 12\)/, "the recipe goes to him directly");
+  assert.equal(outbound("group")[0], "Replied to Aunt privately. — Tom 🦃", "the group hears that he's been replied to");
+
+  await handleInbound({ config, db, client: null as any }, { waId: "g2", from: "19998887777", text: "hi all", group: "120363000@g.us" });
+  await handleInbound({ config, db, client: null as any }, { waId: "g3", from: HOST, text: "status", group: "120363000@g.us" });
+  assert.equal(outbound(HOST).length, 0, "strangers and the host in the group get no reply");
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE phone = '19998887777'").get()?.n, 0, "a stranger's group message isn't logged");
+});
+
+test("in the group, a general question can be answered there; a personal one stays private with a group note", async () => {
+  const general = fakeClient([turn(toolUse("a", "reply", { text: "Dinner is at 2:10, arrive any time 10 to 11. — Tom 🦃", audience: "group" })), done]);
+  await handleInbound({ config, db, client: general.client }, { waId: "g1", from: SUE, text: "what time is dinner?", group: "120363000@g.us" });
+  assert.equal(outbound("group")[0], "Dinner is at 2:10, arrive any time 10 to 11. — Tom 🦃");
+  assert.equal(outbound(SUE).length, 0, "a general answer goes to the group only");
+
+  const personal = fakeClient([turn(toolUse("a", "reply", { text: "Your dietary note is saved. — Tom 🦃", audience: "private" })), done]);
+  await handleInbound({ config, db, client: personal.client }, { waId: "g2", from: SUE, text: "I'm gluten-free", group: "120363000@g.us" });
+  assert.equal(outbound(SUE).at(-1), "Your dietary note is saved. — Tom 🦃");
+  assert.equal(outbound("group").at(-1), "Replied to Aunt privately. — Tom 🦃");
+});
+
+test("people are found by full or first name, ignoring case, and children without phones can be skipped", () => {
+  const fam = { ...config, people: [...config.people, { name: "Kid Test", phone: "", household: "Aunt Sue" }] };
+  assert.equal(findPerson(fam, "aunt")?.name, "Aunt Sue");
+  assert.equal(findPerson(fam, "Aunt Sue")?.name, "Aunt Sue");
+  assert.equal(findPerson(fam, "UNCLE")?.name, "Uncle Bob");
+  assert.equal(findPerson(fam, "Kid", true), undefined, "no phone, so not texted");
+  assert.equal(findPerson(fam, "Kid")?.name, "Kid Test");
+  assert.equal(findPerson(fam, "Zed"), undefined);
+});
+
+test("messages to the same person are spaced out; the first goes out at once", async () => {
+  process.env.MESSAGE_GAP_MS = "120";
+  try {
+    const t0 = Date.now();
+    const fresh = "15550000099"; // nothing sent to them yet in this run
+    await sendText(db, fresh, "first");
+    const first = Date.now() - t0;
+    await sendText(db, fresh, "second");
+    const second = Date.now() - t0 - first;
+    assert.ok(first < 60, "the first message isn't delayed");
+    assert.ok(second >= 100, "the follow-up waits for the gap");
+  } finally {
+    process.env.MESSAGE_GAP_MS = "0";
+  }
+});
+
+test("a second question from the same person joins their open one for the host", async () => {
+  const ctx: Ctx = { config, db, client: null as any };
+  const first = fakeClient([turn(toolUse("a", "escalate", { question: "Can we bring a cheesecake?", suggested_reply: "Checking with Jenn." })), done]);
+  await handleInbound({ ...ctx, client: first.client }, { waId: "k1", from: SUE, text: "cheesecake?" });
+  const second = fakeClient([turn(toolUse("b", "escalate", { question: "Also, can we set the table?", suggested_reply: "Checking." })), done]);
+  await handleInbound({ ...ctx, client: second.client }, { waId: "k2", from: SUE, text: "and the table?" });
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM escalations WHERE phone = ?").get(SUE)?.n, 1, "one item for the host");
+  assert.equal(db.prepare("SELECT question FROM escalations WHERE phone = ?").get(SUE)?.question, "Can we bring a cheesecake?; Also, can we set the table?");
+  assert.equal(outbound(HOST).at(-1), "Added to #1 Aunt Sue: Also, can we set the table?");
 });

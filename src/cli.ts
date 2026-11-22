@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
-import { DATA_DIR, loadConfig, phoneKey } from "./config.ts";
+import { DATA_DIR, findPerson, loadConfig, phoneKey } from "./config.ts";
 import { openDb, lastMessageTs } from "./db.ts";
 import { handleInbound, ovensText, sendReminders, statusText } from "./agent.ts";
 import { connect } from "./whatsapp.ts";
@@ -24,7 +24,7 @@ switch (cmd) {
   case "simulate": {
     process.env.DRY_RUN = "1";
     const [who, ...words] = args;
-    const from = who === "host" ? config.host.phone : (config.people.find((p) => p.name === who)?.phone ?? phoneKey(who ?? ""));
+    const from = who === "host" ? config.host.phone : (findPerson(config, who ?? "")?.phone ?? phoneKey(who ?? ""));
     // roll back afterwards so pretend messages, RSVPs and dish changes never land in the real files
     const eventBefore = readFileSync(config.eventFile);
     db.exec("BEGIN");
@@ -35,6 +35,18 @@ switch (cmd) {
       writeFileSync(config.eventFile, eventBefore);
     }
     break;
+  }
+
+  case "replay": {
+    // one-off: sends one guest message through the live connection as if it just arrived (stop the service first)
+    const [who, ...words] = args;
+    const match = findPerson(config, who ?? "", true);
+    if (!match) throw new Error(`No one with a phone number is called "${who}"`);
+    const from = match.phone;
+    await connect(join(DATA_DIR, "wa-auth"), phoneKey(process.env.WA_BOT_PHONE!), () => {});
+    await new Promise((r) => setTimeout(r, 15_000)); // give the connection time to open
+    await handleInbound({ config, db, client: claude() }, { waId: `replay-${Date.now()}`, from, text: words.join(" "), group: true });
+    process.exit(0);
   }
 
   case "serve": {

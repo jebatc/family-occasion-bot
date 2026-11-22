@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { type Config, type Dish, type Person, phoneKey, saveDish, removeDish, findDish, titleCase } from "./config.ts";
+import { type Config, type Dish, type Person, phoneKey, saveDish, removeDish, findDish, findPerson, titleCase } from "./config.ts";
 import { type Db, logMessage, logChange } from "./db.ts";
 import { LIMITS, WRITE_TOOLS, clip, leaksPhone, recentMessages, screenMessage } from "./guard.ts";
 import { type Inbound, sendText, postToGroup, pause } from "./whatsapp.ts";
@@ -9,11 +9,28 @@ import { type Inbound, sendText, postToGroup, pause } from "./whatsapp.ts";
 const MODEL = "claude-opus-5-5";
 export type Ctx = { config: Config; db: Db; client: Anthropic };
 
+/** Guest-facing messages end with Tom's sign-off, unless they already do. */
+const signed = (config: Config, text: string) => {
+  const sig = String(config.persona.signoff ?? "").trim();
+  return !sig || text.trimEnd().endsWith(sig) ? text : `${text.trimEnd()} ${sig}`;
+};
+
 const tools: Anthropic.Beta.BetaTool[] = [
   {
     name: "reply",
-    description: "Send a WhatsApp message to the guest you're chatting with.",
-    input_schema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+    description: "Send a WhatsApp message to the guest you're chatting with, or to the family group when they asked there.",
+    input_schema: {
+      type: "object",
+      properties: {
+        text: { type: "string" },
+        audience: {
+          type: "string",
+          enum: ["private", "group"],
+          description: "Only for a message that came from the family group. group = a general answer everyone in the family would want (the address, arrival window, dinner time, what's on the menu). private = anything about this person: their RSVP, dietary needs, their dishes, recipes, or anything personal. Default private.",
+        },
+      },
+      required: ["text"],
+    },
   },
   {
     name: "record_rsvp",
@@ -46,7 +63,10 @@ const tools: Anthropic.Beta.BetaTool[] = [
     description: "Send the guest the recipe the host uses for a dish on the menu, when they ask for it.",
     input_schema: {
       type: "object",
-      properties: { dish: { type: "string", description: "The dish name exactly as in the menu" } },
+      properties: {
+        dish: { type: "string", description: "The dish name exactly as in the menu" },
+        note: { type: "string", description: "A short line that opens the same message, before the recipe (e.g. a joke or a tip)" },
+      },
       required: ["dish"],
     },
   },
@@ -87,7 +107,7 @@ const tools: Anthropic.Beta.BetaTool[] = [
         serves: { type: "string", description: "How many it feeds, if they said" },
         dietary: { type: "string", description: "e.g. gluten-free, vegetarian, contains nuts, if they said" },
         notes: { type: "string", description: "Anything else: oven or grill needs, timing, whether they're bringing it ready" },
-        suggested_reply: { type: "string", description: "What to tell the guest if the host approves" },
+        suggested_reply: { type: "string", description: "What to tell the guest if the host approves. Don't say it's approved; the host hasn't decided yet." },
       },
       required: ["dish", "course", "suggested_reply"],
     },
@@ -99,7 +119,7 @@ const tools: Anthropic.Beta.BetaTool[] = [
       type: "object",
       properties: {
         question: { type: "string", description: "The guest's question or request, in one or two sentences" },
-        suggested_reply: { type: "string", description: "Your best guess at a reply the host could approve" },
+        suggested_reply: { type: "string", description: "A holding reply to the guest that doesn't say what the host has decided. Only give a real answer if the plan already settles it. Never write things like \"Jenn says\" or \"Jenn loves it\"." },
       },
       required: ["question", "suggested_reply"],
     },
@@ -114,7 +134,11 @@ function systemPrompt({ config, db }: Ctx) {
 You're chatting 1:1 on WhatsApp with a family member. Keep replies short, like a text message.
 
 Rules:
+- When a message needs several things, send each as its own message, in this order: (1) answer what they asked, such as sending a recipe with send_recipe, with a short note as its opening line; (2) ask them to confirm the dishes by name, e.g. "Can I put you down for the Spanakopita, Zimaropita and Cranberry Sauce? Please reply YES or NO. — Tom"; only call record_contribution after they reply YES; (3) once a dish is recorded, follow up with any question you need, such as an oven temperature. For oven questions, ask only the temperature and cooking time, never which oven or when it's planned. Keep each message short. Never ask a follow-up about a dish they haven't confirmed.
+- Keep Tom playful: a light, on-theme pun or joke (turkey, gravy, cranberries, ovens, dishes) when it fits, like "Berry convenient!" or "un-be-leaf-able". Never at a guest's expense, never in place of a clear answer, and keep temperatures, times, addresses and dietary facts plain.
+- Messages from the family group: answer privately (the reply tool's default) unless the answer is general and everyone would benefit, then use audience "group". Never put anything personal in the group.
 - Answer only from the event details, plan, schedule and host answers below. If the answer isn't there or you're unsure, call escalate and tell the guest you're checking with ${host.name}.
+- If a family member jumps straight to recipe requests or follow-ups about their dishes without answering the invitation, presume their household is attending: call record_rsvp with status "yes" and a note such as "presumed from dish follow-up", then carry on as usual.
 - A yes RSVP means their whole household is coming; don't ask how many. If they want to bring anyone beyond their household (a friend, a date, extra guests), escalate it to ${host.name}.
 - Escalate anything that would change the plan: guests beyond their own household, swapping or dropping dishes, dietary conflicts, money, logistics, or anything sensitive.
 - Recording the guest's own RSVP, or their yes/no on a dish they were asked to bring, needs no escalation.
@@ -222,6 +246,12 @@ ${history.map((m) => `${m.direction === "in" ? guest.name : "You"}: ${m.body}`).
 
 async function escalate(ctx: Ctx, guest: Person, question: string, suggested?: string, dish?: string) {
   const { host } = ctx.config;
+  // one open question per person: a follow-up from them adds to it rather than starting another
+  const open = dish ? undefined : (ctx.db.prepare("SELECT id, question FROM escalations WHERE phone = ? AND status = 'open' AND dish IS NULL ORDER BY id DESC LIMIT 1").get(guest.phone) as { id: number; question: string } | undefined);
+  if (open) {
+    ctx.db.prepare("UPDATE escalations SET question = ? WHERE id = ?").run(`${open.question}; ${question}`, open.id);
+    return sendText(ctx.db, host.phone, `Added to #${open.id} ${guest.name}: ${question}`);
+  }
   const { lastInsertRowid: id } = ctx.db
     .prepare("INSERT INTO escalations (phone, question, suggested, ts, dish) VALUES (?, ?, ?, ?, ?)")
     .run(guest.phone, question, suggested ?? null, Date.now(), dish ?? null);
@@ -231,7 +261,7 @@ async function escalate(ctx: Ctx, guest: Person, question: string, suggested?: s
   await sendText(ctx.db, host.phone, `#${id} ${guest.name} ${dish ? question : `asks: ${question}`}\n${how}`);
 }
 
-async function runTool(ctx: Ctx, guest: Person, name: string, input: any) {
+async function runTool(ctx: Ctx, guest: Person, name: string, input: any, inGroup?: string) {
   switch (name) {
     case "reply": {
       const text = clip(input.text, LIMITS.reply);
@@ -239,7 +269,11 @@ async function runTool(ctx: Ctx, guest: Person, name: string, input: any) {
         await sendText(ctx.db, ctx.config.host.phone, `⚠️ Held a reply to ${guest.name} because it contained a phone number:\n${text}`);
         return "error: reply blocked because it contained a phone number. Never share phone numbers; send a reply without one.";
       }
-      await sendText(ctx.db, guest.phone, text);
+      if (inGroup && input.audience === "group") {
+        await postToGroup(ctx.db, process.env.WA_GROUP_NAME ?? "", signed(ctx.config, text), inGroup);
+        return "posted to the family group";
+      }
+      await sendText(ctx.db, guest.phone, signed(ctx.config, text));
       return "sent";
     }
     case "record_rsvp":
@@ -260,7 +294,7 @@ async function runTool(ctx: Ctx, guest: Person, name: string, input: any) {
       if (input.status === "confirmed") {
         const when = new Date().toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
         saveDish(ctx.config.eventFile, dish.dish, { status: "confirmed", confirmation: `${when}${input.note ? `: ${clip(input.note)}` : ""}` });
-        if (needsTemp(dish)) return `recorded. ${dish.dish} is planned for the ${dish.oven!.name} oven (${dish.oven!.when ?? "time to be set"}) but has no temperature yet: in your reply, ask what oven temperature and how long it needs, then call record_oven_needs with their answer.`;
+        if (needsTemp(dish)) return `recorded. ${dish.dish} still needs an oven temperature: in your follow-up message ask only what temperature and how long it needs (don't mention which oven or when it's planned), then call record_oven_needs with their answer.`;
       } else if (dish.fallback) {
         const toHost = owns({ dish: "", owner: dish.fallback }, ctx.config.host);
         saveDish(ctx.config.eventFile, dish.dish, { owner: dish.fallback, status: toHost ? "confirmed" : "proposed", declined_by: guest.name });
@@ -277,7 +311,7 @@ async function runTool(ctx: Ctx, guest: Person, name: string, input: any) {
       const file = join(ctx.config.dataDir, recipe);
       const text = /^https?:\/\//.test(recipe) ? recipe : existsSync(file) ? readFileSync(file, "utf8") : undefined;
       if (!text) return "the recipe file is missing; escalate if they still want it";
-      await sendText(ctx.db, guest.phone, text);
+      await sendText(ctx.db, guest.phone, signed(ctx.config, [input.note && clip(input.note, 300), text].filter(Boolean).join("\n\n")));
       return "sent";
     }
     case "set_dish_dietary": {
@@ -327,7 +361,7 @@ async function runTool(ctx: Ctx, guest: Person, name: string, input: any) {
 }
 
 /** Runs Claude on the guest's latest message; returns true if they RSVP'd yes this turn. */
-async function runGuestAgent(ctx: Ctx, guest: Person) {
+async function runGuestAgent(ctx: Ctx, guest: Person, inGroup?: string) {
   let saidYes = false;
   let writes = 0;
   const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: "user", content: guestContext(ctx, guest) }];
@@ -358,7 +392,7 @@ async function runGuestAgent(ctx: Ctx, guest: Person) {
         if (isWrite && writes >= LIMITS.writesPerMessage) {
           content = `error: one message can make at most ${LIMITS.writesPerMessage} changes; escalate anything else to the host`;
         } else {
-          content = await runTool(ctx, guest, block.name, block.input);
+          content = await runTool(ctx, guest, block.name, block.input, inGroup);
           if (isWrite && !content.startsWith("error")) {
             writes++;
             logChange(ctx.db, guest.phone, block.name, clip(JSON.stringify(block.input), 500));
@@ -390,7 +424,7 @@ async function handleHost(ctx: Ctx, text: string) {
     const needs = [...new Set(conflicts.map((c) => c.need))];
     const who = [...new Set(conflicts.map((c) => c.person.split(" ")[0]))];
     const question = needs.length ? `\n\nOne quick question: is it ${needs.join(" and ")}? ${who.join(" and ")} ${who.length === 1 ? "needs" : "need"} that.` : "";
-    await sendText(db, esc.phone as string, answer + question);
+    await sendText(db, esc.phone as string, signed(config, answer + question));
     // a dish proposal stays open until it's settled with ok or no
     if (!esc.dish || ok || no) db.prepare("UPDATE escalations SET answer = ?, status = 'done' WHERE id = ?").run(answer, esc.id);
     if (esc.dish && ok) saveDish(config.eventFile, esc.dish as string, { status: "confirmed" });
@@ -414,8 +448,7 @@ async function handleHost(ctx: Ctx, text: string) {
   // "request Pat" covers just that person's household
   const reqFor = text.trim().match(/^request\s+(.+)$/i);
   if (reqFor) {
-    const who = reqFor[1].trim().toLowerCase();
-    const p = config.people.find((p) => [p.name, p.name.split(" ")[0]].some((n) => n.toLowerCase() === who));
+    const p = findPerson(config, reqFor[1]);
     if (!p) return sendText(db, host, `I don't have anyone called "${reqFor[1].trim()}".`);
     return sendAll(ctx, requestMessages(ctx, p.household), `${p.household}: `);
   }
@@ -423,11 +456,10 @@ async function handleHost(ctx: Ctx, text: string) {
   // "tell Robin: Great, see you then!" sends the host's own words to a guest through the bot
   const tell = text.trim().match(/^tell\s+([^:]+):\s*([\s\S]+)$/i);
   if (tell) {
-    const who = tell[1].trim().toLowerCase();
-    const matches = config.people.filter((p) => p.phone && [p.name, p.name.split(" ")[0]].some((n) => n.toLowerCase() === who));
-    if (matches.length !== 1) return sendText(db, host, matches.length ? `More than one "${tell[1].trim()}"; use their full name.` : `I don't have anyone called "${tell[1].trim()}" with a phone number.`);
-    await sendText(db, matches[0].phone, tell[2].trim());
-    return sendText(db, host, `Sent to ${matches[0].name}.`);
+    const match = findPerson(config, tell[1], true);
+    if (!match) return sendText(db, host, `I don't have anyone called "${tell[1].trim()}" with a phone number.`);
+    await sendText(db, match.phone, signed(config, tell[2].trim()));
+    return sendText(db, host, `Sent to ${match.name}.`);
   }
   // "temp gluten-free stuffing 375 25" sets the host's own dish: °F, then optional minutes
   const t = text.trim().match(/^temp\s+(.+?)\s+(\d{3})\s*°?\s*f?(?:\s+(\d{1,3})\s*(?:min(?:utes)?)?)?$/i);
@@ -567,6 +599,17 @@ export async function sendReminders(ctx: Ctx, anyHour = false) {
   if (anyHour) return sendText(ctx.db, ctx.config.host.phone, "No reminders due: everyone has answered or heard from me in the last 24 hours.");
 }
 
+/** A family member asked in the group and got a private reply: say so in the group, so everyone knows they're covered. */
+async function acknowledgeGroup({ config, db }: Ctx, guest: Person, since: number, jid: string) {
+  const privately = Number(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE phone = ? AND direction = 'out' AND ts >= ?").get(guest.phone, since)?.n ?? 0);
+  if (!privately) return;
+  try {
+    await postToGroup(db, process.env.WA_GROUP_NAME ?? "", signed(config, `Replied to ${guest.name.split(" ")[0]} privately.`), jid);
+  } catch (err) {
+    await sendText(db, config.host.phone, `Couldn't post the group note for ${guest.name}: ${(err as Error).message}`);
+  }
+}
+
 /** After a yes: let the rest of the household know, then send the household's dish requests. */
 async function followUpRequests(ctx: Ctx, guest: Person) {
   const { config, db } = ctx;
@@ -659,9 +702,11 @@ export function statusText(config: Config, db: Db) {
 export async function handleInbound(ctx: Ctx, msg: Inbound) {
   const { config, db } = ctx;
   const from = phoneKey(msg.from);
+  // the family group: only answer family members, and only directly; strangers and the host there are ignored
+  if (msg.group && !config.people.some((p) => p.phone === from)) return;
   if (!logMessage(db, from, "in", msg.text, msg.waId)) return; // duplicate delivery
   if (from === config.host.phone) return handleHost(ctx, msg.text);
-  const guest = config.people.find((p) => p.phone === from);
+  const guest = config.people.find((p) => p.phone && p.phone === from); // children without phones never match
   if (!guest) return sendText(db, config.host.phone, `Message from unknown number +${from}: ${msg.text}`);
   try {
     const sent = recentMessages(db, from);
@@ -679,7 +724,9 @@ export async function handleInbound(ctx: Ctx, msg: Inbound) {
       return sendText(db, config.host.phone, `⚠️ Held a message from ${guest.name} without replying (${clip(reason, 150)}):\n"${clip(msg.text)}"\nIf it needs an answer: tell ${guest.name.split(" ")[0]}: <your message>`);
     }
     // event-driven: a yes gets the bot's confirmation reply first, then that household's dish requests
-    if (await runGuestAgent(ctx, guest)) await followUpRequests(ctx, guest);
+    const since = Date.now();
+    if (await runGuestAgent(ctx, guest, msg.group)) await followUpRequests(ctx, guest);
+    if (msg.group) await acknowledgeGroup(ctx, guest, since, msg.group);
   } catch (err) {
     console.error(`agent failed for ${guest.name}`, err);
     await sendText(db, config.host.phone, `⚠️ I hit an error answering ${guest.name}: "${msg.text}". Please reply to them directly.`);

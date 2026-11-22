@@ -101,4 +101,11 @@ export function removeDish(eventFile: string, name: string) {
   writeFileSync(eventFile, doc.toString({ lineWidth: 0 }));
 }
 
+/** Finds a person by full name or first name, ignoring case. needPhone skips people texted by someone else (children). */
+export function findPerson(config: Config, name: string, needPhone = false): Person | undefined {
+  const q = name.trim().toLowerCase();
+  return [config.host, ...config.people].find((p) =>
+    (!needPhone || p.phone) && [p.name, p.name.split(" ")[0]].some((n) => n.toLowerCase() === q));
+}
+
 export const findDish = (config: Config, name: string) => config.menu.find((d) => sameDish(d.dish, name));

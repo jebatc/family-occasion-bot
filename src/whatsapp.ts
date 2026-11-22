@@ -14,27 +14,39 @@ async function send(jid: string, text: string) {
   await sock.sendMessage(jid, { text });
 }
 
+// Messages to the same person are spaced out, so a follow-up never lands right after the one before it
+const lastSent = new Map<string, number>();
+const gapMs = () => Number(process.env.MESSAGE_GAP_MS ?? 5 * 60_000);
+
+async function pace(to: string) {
+  const wait = (lastSent.get(to) ?? 0) + gapMs() - Date.now();
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  lastSent.set(to, Date.now());
+}
+
 export async function sendText(db: Db, to: string, body: string) {
+  await pace(to);
   await send(`${to}@s.whatsapp.net`, body);
   logMessage(db, to, "out", body);
 }
 
-export async function postToGroup(db: Db, groupName: string, body: string) {
-  let jid = "dry-run-group";
-  if (!process.env.DRY_RUN) {
+/** Posts to a group: the one a message came from (jid), or else the family group by name. */
+export async function postToGroup(db: Db, groupName: string, body: string, jid?: string) {
+  let target = jid ?? "dry-run-group";
+  if (!jid && !process.env.DRY_RUN) {
     const groups = Object.values(await sock!.groupFetchAllParticipating());
     const group = groups.find((g) => g.subject.trim().toLowerCase() === groupName.trim().toLowerCase());
     if (!group) throw new Error(`The bot isn't in a group named "${groupName}"`);
-    jid = group.id;
+    target = group.id;
   }
-  await send(jid, body);
+  await send(target, body);
   logMessage(db, "group", "out", body);
 }
 
 // Spread bulk sends out: rapid-fire messages from an unofficial client are what gets numbers banned
 export const pause = () => new Promise((r) => setTimeout(r, process.env.DRY_RUN ? 0 : 4000 + Math.random() * 6000));
 
-export type Inbound = { waId: string; from: string; text: string; ts?: number };
+export type Inbound = { waId: string; from: string; text: string; ts?: number; group?: string }; // group: the group's id, when it came from one
 
 const CATCH_UP_MS = 3 * 24 * 3600 * 1000;
 
@@ -45,14 +57,18 @@ export const worthCatchingUp = (msg: Inbound, since: number, now = Date.now()) =
 /** Text DMs only; groups, our own messages and non-text (reactions, media, receipts) are ignored. */
 export function toInbound(m: WAMessage): Inbound | undefined {
   const { key } = m;
-  if (key.fromMe || !key.remoteJid || isJidGroup(key.remoteJid)) return;
+  if (key.fromMe || !key.remoteJid) return;
+  const group = isJidGroup(key.remoteJid);
+  if (group && !key.participant) return;
   const text = m.message?.conversation ?? m.message?.extendedTextMessage?.text;
   if (!text || !key.id) return;
   // WhatsApp may address senders by a private "lid"; the phone-number jid is then in remoteJidAlt
-  const pn = [key.remoteJid, key.remoteJidAlt].find((j) => j && isPnUser(j));
+  // in a group the sender is the participant; either id may be a private "lid" with the phone number alongside
+  const ids = group ? [key.participant!, key.participantAlt] : [key.remoteJid, key.remoteJidAlt];
+  const pn = ids.find((j) => j && isPnUser(j));
   const t = m.messageTimestamp as number | { toNumber(): number } | null | undefined;
   const secs = typeof t === "number" ? t : t?.toNumber();
-  return { waId: key.id, from: jidDecode(pn ?? key.remoteJid)!.user, text, ...(secs ? { ts: secs * 1000 } : {}) };
+  return { waId: key.id, from: jidDecode(pn ?? ids[0]!)!.user, text, ...(secs ? { ts: secs * 1000 } : {}), ...(group ? { group: key.remoteJid! } : {}) };
 }
 
 // libsignal (inside Baileys) dumps encryption session keys via console.info/warn on routine key rotation

@@ -41,6 +41,8 @@ And for you, the host:
 5. **Follow up.** Once a day, during daytime, anyone who hasn't RSVP'd or confirmed their dishes gets a short nudge. It stops after the event.
 6. **Settle the details.** People confirm or decline dishes, ask for your recipe, offer new dishes for you to approve, and tell the bot oven temperatures. The plan updates itself as they do.
 
+If a family member asks something in the group chat, the bot decides where the answer belongs. General answers (dinner time, the address) go to the group. Anything personal (an RSVP, dietary needs, a recipe) goes to them directly, and the group gets a one-line note that they've been replied to. Messages from people outside the family list are ignored.
+
 Anything the bot isn't sure about comes to you as a numbered question. Nothing about extra guests, new dishes or changes to the plan happens without your OK.
 
 ## Your plan lives in plain files
