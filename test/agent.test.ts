@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, saveDish, titleCase, type Config } from "../src/config.ts";
 import { openDb, logMessage, type Db } from "../src/db.ts";
-import { tom, statusText, dietaryConflicts, ovensText, reminderMessages, type Ctx } from "../src/agent.ts";
+import { tom, statusText, dietaryConflicts, ovensText, reminderMessages, snapshotData, type Ctx } from "../src/agent.ts";
 import { triage, newTriageState, type TriageState } from "../src/triage.ts";
 import { toInbound, worthCatchingUp } from "../src/whatsapp.ts";
 import { useTransport, dryRunSent, textHash, sharesHostNumber, type Inbound } from "../src/transport.ts";
@@ -747,3 +747,26 @@ test("texting as you: the bot's replies in your self-chat aren't run as commands
     await handleInbound({ config, db, client: null as any }, { waId: "w2", from: HOST, text: reply });
     assert.equal(outbound(HOST).length, 1);
   }));
+
+test("every text Tom sends records why, and the dashboard lists what he plans to send", async () => {
+  const why = (phone: string) => db.prepare("SELECT why FROM messages WHERE phone = ? AND direction = 'out' ORDER BY id").all(phone).map((r) => r.why);
+  await handleInbound({ config, db, client: null as any }, { waId: "w1", from: HOST, text: "rsvp" });
+  assert.deepEqual(why(SUE), ['Invitation (you texted "rsvp")']);
+  const { client } = fakeClient([
+    turn(toolUse("a", "escalate", { question: "Can I bring my dog?", suggested_reply: "Of course, bring Biscuit!" }), toolUse("b", "reply", { text: "Let me check! — Tom 🦃" })),
+    done,
+  ]);
+  await handleInbound({ config, db, client }, { waId: "w2", from: SUE, text: "can I bring my dog?" });
+  assert.equal(why(SUE)[1], 'Reply to their text: "can I bring my dog?"');
+
+  // a day later, with Bob still not answering
+  const later = new Date(Date.now() + 25 * 3600_000);
+  const snap = snapshotData({ config, db, client: null as any }, later);
+  const sent = snap.messages.filter((m) => m.direction === "from Tom" && m.person === "Aunt Sue");
+  assert.deepEqual(sent.map((m) => m.why), ['Invitation (you texted "rsvp")', 'Reply to their text: "can I bring my dog?"']);
+  const toBob = snap.planned.find((p) => p.to === "Uncle Bob" && p.trigger === "On its own");
+  assert.match(String(toBob?.text), /Just checking in: will you be joining/);
+  assert.equal(toBob?.why, "Daily nudge: invited, but no RSVP yet");
+  const answer = snap.planned.find((p) => p.trigger === 'When you text "#1 ok"');
+  assert.deepEqual([answer?.to, answer?.text, answer?.why], ["Aunt Sue", "Of course, bring Biscuit!", "Suggested answer to question #1"]);
+});

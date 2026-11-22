@@ -39,10 +39,13 @@ async function deliver(to: string, text: string, how: (t: Transport) => Promise<
   await how(active);
 }
 
-/** Sends a text and logs it in the project's database (with a fingerprint, so its echoes can be recognized). */
-export async function sendText(db: Db, to: string, body: string) {
+/**
+ * Sends a text and logs it in the project's database, with a fingerprint (so its echoes can be recognized) and
+ * why it was sent.
+ */
+export async function sendText(db: Db, to: string, body: string, why?: string) {
   await deliver(to, body, (t) => t.send(to, body));
-  logMessage(db, to, "out", body, undefined, textHash(body));
+  logMessage(db, to, "out", body, undefined, textHash(body), why);
 }
 
 /** Sends a text without logging it anywhere: triage's notices and replies. */
