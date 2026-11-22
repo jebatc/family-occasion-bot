@@ -93,6 +93,8 @@ test("replies go out on the service Messages last used with that person", () => 
   assert.equal(serviceFor(chat, "+15550000001"), "iMessage");
   assert.equal(serviceFor(chat, "+15550000002"), "SMS");
   assert.equal(serviceFor(chat, "+15559999999"), "iMessage", "new people are tried on iMessage first");
+  chat.exec("INSERT INTO handle VALUES (9, '+15550000009', 'RCS'); INSERT INTO chat VALUES (9, 45, 'RCS', NULL); INSERT INTO chat_handle_join VALUES (9, 9)");
+  assert.equal(serviceFor(chat, "+15550000009"), "SMS", "Android (RCS) contacts go through the SMS account");
 });
 
 test("send passes the text as an argument and falls back to SMS when iMessage fails", async () => {

@@ -93,7 +93,8 @@ export function serviceFor(db: DatabaseSync, handle: string): "iMessage" | "SMS"
   const row = db.prepare(`
     SELECT c.service_name AS s FROM chat c JOIN chat_handle_join chj ON chj.chat_id = c.ROWID JOIN handle h ON h.ROWID = chj.handle_id
     WHERE h.id = ? AND c.style = 45 ORDER BY c.ROWID DESC LIMIT 1`).get(handle);
-  return row?.s === "SMS" ? "SMS" : "iMessage";
+  // RCS (Android) threads go out through the same SMS account: the paired iPhone picks RCS or SMS
+  return row?.s === "SMS" || row?.s === "RCS" ? "SMS" : "iMessage";
 }
 
 // Text and recipient travel as arguments, never inside the script, so nothing in a message can run as AppleScript
