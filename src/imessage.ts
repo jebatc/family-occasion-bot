@@ -138,6 +138,33 @@ export function sendFailed(db: DatabaseSync, handle: string, afterRowid: number)
   return !!row && Number(row.error) !== 0;
 }
 
+const SEND_FILE_SCRIPT = `
+on run argv
+  set theHandle to item 1 of argv
+  set thePath to item 2 of argv
+  set theService to item 3 of argv
+  tell application "Messages"
+    if theService is "SMS" then
+      set acct to 1st account whose service type = SMS
+    else
+      set acct to 1st account whose service type = iMessage
+    end if
+    send (POSIX file thePath) to participant theHandle of acct
+  end tell
+end run`;
+
+/** Sends a picture to one person, as SMS if iMessage fails to deliver it (same check as the text send). Returns the service that worked. */
+export async function sendPhoto(db: DatabaseSync, handle: string, path: string, service: "iMessage" | "SMS", run: RunScript = osascript, failCheckMs = 15_000) {
+  const before = maxRowid(db);
+  await run(SEND_FILE_SCRIPT, [handle, path, service]);
+  if (service === "SMS") return "SMS";
+  await new Promise((r) => setTimeout(r, failCheckMs));
+  if (!sendFailed(db, handle, before)) return "iMessage";
+  console.log(`iMessage picture to ${handle} failed, sending as SMS instead.`);
+  await run(SEND_FILE_SCRIPT, [handle, path, "SMS"]);
+  return "SMS";
+}
+
 /**
  * Decides which chat.db rows reach the bot, and as what. host: see imessage(). remember(): call before each send,
  * so the bot's own texts (and iMessage's echo of texts to yourself) aren't read back as the host's.

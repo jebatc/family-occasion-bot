@@ -110,7 +110,7 @@ From the host's own phone (with `TEXT_AS=me`, in the chat with yourself):
 Family members can't make the bot run code or change things they shouldn't:
 
 - **Narrow actions only.** The AI can only reply, record an RSVP, confirm or decline its sender's own dishes, send a recipe you provided, propose a dish for you to approve, save dietary or oven details for its sender's own dishes, or ask you. Each is limited to the sender's own household.
-- **Screening.** Every message is first checked by a small, fast model. Off-topic requests get a polite "I can only help with Thanksgiving plans". Anything suspicious (trying to change the bot's rules, asking for other people's details, acting for another household) gets no reply and comes to you.
+- **Screening.** Every message is first checked by a small, fast model. Off-topic texts are ignored: no reply. Anything suspicious (trying to change the bot's rules, asking for other people's details, acting for another household) gets no reply and comes to you.
 - **Limits.** Each message can make only a few changes, each guest can have only a couple of pending dish ideas, text is trimmed, and auto-replies pause if one person sends too many messages.
 - **No phone numbers out.** A reply containing a phone number is blocked and shown to you instead.
 - **You stay informed.** You're told when someone changes a yes, declines a dish, or offers something that doesn't fit a family member's dietary needs. Every change is logged.

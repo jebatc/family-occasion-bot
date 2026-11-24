@@ -22,8 +22,6 @@ export interface Project {
   conversation(phone: string): { direction: string; body: string }[];
   /** Did the project send this text (by fingerprint) to this number? Tells its own texts from the host's. */
   sent(phone: string, hash: string): boolean;
-  /** The reply to an off-topic text, when the project has a number of its own. */
-  offTopicReply(): string;
   /** A text referred to the project: a command from the host, or a relevant text from someone it knows. */
   handle(r: Referral): Promise<void>;
 }
@@ -88,7 +86,7 @@ export function triage(opts: { project: Project; client: Anthropic; shared: bool
       console.error(`screening failed for ${person.name}`, (err as Error).message);
       return tellHost(`⚠️ I couldn't check a message from ${person.name}${quote()}, so I haven't answered it. Please reply to them directly.`);
     }
-    if (verdict === "off_topic") return shared ? undefined : sendOnly(from, project.offTopicReply());
+    if (verdict === "off_topic") return; // unrelated: ignored, never answered
     if (verdict === "suspicious")
       return tellHost(`⚠️ Held a message from ${person.name} without replying (${clip(reason, 150)})${shared ? ". It's in your thread with them." : `:\n"${clip(msg.text)}"`}\nIf it needs an answer: tell ${person.name.split(" ")[0]}: <your message>`);
 

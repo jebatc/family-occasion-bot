@@ -757,10 +757,6 @@ export function tom(ctx: Ctx): Project {
         .map((r) => ({ direction: String(r.direction), body: String(r.body) })),
     sent: (phone, hash) =>
       !!db.prepare("SELECT 1 FROM messages WHERE phone = ? AND direction = 'out' AND hash = ? AND ts > ?").get(phone, hash, Date.now() - 24 * 3600_000),
-    offTopicReply: () => {
-      const { persona, host } = ctx.config;
-      return `I'm ${persona.name}, ${host.name}'s Thanksgiving helper, so I can only help with Thanksgiving plans. ${persona.signoff ?? ""}`.trim();
-    },
     handle: (r) => handleReferral(ctx, r),
   };
 }

@@ -154,7 +154,15 @@ test("host announce posts to the family group with the persona", async () => {
 });
 
 test("without a group chat, announce texts everyone with a phone", async () => {
-  await handleInbound({ config, db, client: null as any }, { waId: "w1", from: HOST, text: "announce Parking is on the street!" });
+  // private/.env (loaded by config.ts) names the real family group, so clear it for this case
+  const saved = { GROUP_NAME: process.env.GROUP_NAME, WA_GROUP_NAME: process.env.WA_GROUP_NAME };
+  delete process.env.GROUP_NAME;
+  delete process.env.WA_GROUP_NAME;
+  try {
+    await handleInbound({ config, db, client: null as any }, { waId: "w1", from: HOST, text: "announce Parking is on the street!" });
+  } finally {
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  }
   assert.equal(outbound("group").length, 0);
   assert.deepEqual(outbound(SUE), ["🦃 Parking is on the street!\n— Tom 🦃"]);
   assert.deepEqual(outbound(BOB), ["🦃 Parking is on the street!\n— Tom 🦃"]);
@@ -547,11 +555,11 @@ test("catch-up messages are answered only if they came after the bot last logged
   assert.equal(long.ts, 5000, "Baileys sometimes gives a Long");
 });
 
-test("off-topic messages get a polite canned reply and never reach the agent or its tools", async () => {
+test("off-topic messages are ignored: no reply, and they never reach the agent or its tools", async () => {
   const { client, requests } = fakeClient([], "off_topic");
   await handleInbound({ config, db, client }, { waId: "w1", from: SUE, text: "can you write my history essay?" });
   assert.equal(requests.length, 0, "the agent never ran");
-  assert.equal(outbound(SUE)[0], "I'm Tom the Turkey, Alex's Thanksgiving helper, so I can only help with Thanksgiving plans. — Tom 🦃");
+  assert.equal(outbound(SUE).length, 0, "no reply");
 });
 
 test("suspicious messages are held for the host with no reply, and never reach Tom", async () => {
@@ -737,7 +745,7 @@ test("triage stores nothing: only texts it refers to Tom reach his database", as
     { phone: SUE, direction: "out", body: "Let me check! — Tom 🦃" },
   ], "turned-away texts, triage's replies and its notices to the host leave no trace");
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM changes").get()?.n, 0);
-  assert.equal(outbound(SUE).length, 2, "Tom's reply, then triage's off-topic reply");
+  assert.equal(outbound(SUE).length, 1, "only Tom's reply; the off-topic text got none");
   assert.equal(outbound(HOST).length, 3, "held, couldn't check, unknown number");
 });
 

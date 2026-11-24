@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
-  msToAppleDate, textFromAttributedBody, rowToInbound, newMessages, serviceFor, sendFailed, imessage, inboundFilter,
+  msToAppleDate, textFromAttributedBody, rowToInbound, newMessages, serviceFor, sendFailed, sendPhoto, imessage, inboundFilter,
 } from "../src/imessage.ts";
 import type { Inbound } from "../src/transport.ts";
 
@@ -120,6 +120,31 @@ test("a delivered iMessage isn't resent", () => {
   assert.equal(sendFailed(chat, "+15550000001", before), false);
   addMessage({ handle: 1, fromMe: true, text: "later one failed", error: 22 });
   assert.equal(sendFailed(chat, "+15550000001", before), false, "only the message just sent counts");
+});
+
+test("a picture that iMessage fails to deliver is sent again as SMS", async () => {
+  const calls: string[] = [];
+  const run = async (_script: string, args: string[]) => {
+    calls.push(args[2]);
+    if (args[2] === "iMessage") addMessage({ handle: 1, text: null, fromMe: true, error: 22 }); // Messages marks the send failed
+    return "";
+  };
+  assert.equal(await sendPhoto(chat, "+15550000001", "/card.jpg", "iMessage", run, 0), "SMS");
+  assert.deepEqual(calls, ["iMessage", "SMS"]);
+});
+
+test("a picture that iMessage delivers is sent once", async () => {
+  const calls: string[] = [];
+  const run = async (_script: string, args: string[]) => { calls.push(args[2]); return ""; };
+  assert.equal(await sendPhoto(chat, "+15550000001", "/card.jpg", "iMessage", run, 0), "iMessage");
+  assert.deepEqual(calls, ["iMessage"]);
+});
+
+test("a picture sent as SMS is not checked for failure", async () => {
+  const calls: string[] = [];
+  const run = async (_script: string, args: string[]) => { calls.push(args[2]); return ""; };
+  assert.equal(await sendPhoto(chat, "+15550000002", "/card.jpg", "SMS", run, 0), "SMS");
+  assert.deepEqual(calls, ["SMS"]);
 });
 
 const HOST = "15550000000";
