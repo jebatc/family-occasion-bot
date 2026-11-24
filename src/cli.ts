@@ -5,6 +5,7 @@ import { DATA_DIR, findPerson, loadConfig, phoneKey } from "./config.ts";
 import { openDb, lastMessageTs } from "./db.ts";
 import { ovensText, sendReminders, statusText, tom, snapshotData } from "./agent.ts";
 import { triage } from "./triage.ts";
+import { acquireLock } from "./lock.ts";
 import { useTransport, sharesHostNumber } from "./transport.ts";
 import { whatsapp } from "./whatsapp.ts";
 import { imessage, checkMessages } from "./imessage.ts";
@@ -54,6 +55,10 @@ switch (cmd) {
     break;
 
   case "serve": {
+    if (!acquireLock(join(DATA_DIR, "bot.pid"))) {
+      console.error("Another copy of the bot is already running (a terminal, or the background service). Stop it first; two copies answer every text twice.");
+      process.exit(0); // clean exit: the background service doesn't restart after one
+    }
     const kind = (process.env.TRANSPORT ?? "messages").toLowerCase();
     if (!["messages", "whatsapp"].includes(kind)) throw new Error(`TRANSPORT must be "messages" or "whatsapp", not "${kind}"`);
     const missing = ["ANTHROPIC_API_KEY", ...(kind === "whatsapp" ? ["WA_BOT_PHONE"] : [])].filter((k) => !process.env[k]);
