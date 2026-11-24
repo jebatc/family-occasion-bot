@@ -1,4 +1,4 @@
-// Sends the Thanksgiving greeting (text + card image) to everyone in private/friends.yaml.
+// Sends the Thanksgiving greeting (the card, with the greeting written on it) to everyone in private/friends.yaml.
 // Each person gets their own text thread (never a group chat); iMessage falls back to SMS per person.
 // Usage: node scripts/send-greeting.ts [--dry-run] [--now]
 //   --dry-run  print who would get what, send nothing
@@ -7,12 +7,11 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
-import { CHAT_DB, imessage, openChatDb, sendPhoto, serviceFor } from "../src/imessage.ts";
+import { CHAT_DB, openChatDb, sendPhoto, serviceFor } from "../src/imessage.ts";
 
 const ROOT = join(import.meta.dirname, "..");
-const SOURCE = join(ROOT, "private", "greeting-card.jpg");
+const SOURCE = join(ROOT, "private", "greeting-card-captioned.jpg"); // made by scripts/caption-card.py: the greeting is written on the card
 const IMAGE = join(homedir(), "Pictures", "tom", "greeting-card.jpg"); // Messages only attaches files from here (not the project folder)
-const TEXT = "Happy Thanksgiving!\n\n-Tom the Turkey 🦃 (Jenn's Thanksgiving Agent)";
 const THANKSGIVING = "2026-11-26"; // fourth Thursday of November 2026
 
 const args = new Set(process.argv.slice(2));
@@ -29,19 +28,16 @@ copyFileSync(SOURCE, IMAGE);
 
 const dry = args.has("--dry-run");
 const db = dry ? undefined : openChatDb(CHAT_DB);
-const transport = imessage();
 const handleFor = (phone: string) => `+${phone.replace(/\D/g, "")}`;
 
 for (const f of friends) {
   const handle = handleFor(f.phone);
   const service = db ? serviceFor(db, handle) : "auto";
   if (dry) {
-    console.log(`would send to ${f.name} (${handle}, ${service}): "${TEXT}" + card image`);
+    console.log(`would send to ${f.name} (${handle}, ${service}): the card`);
     continue;
   }
   try {
-    await transport.send(f.phone.replace(/\D/g, ""), TEXT); // transport.send already falls back to SMS for the text
-    await new Promise((r) => setTimeout(r, 2_000)); // keep the text and the picture apart
     const used = await sendPhoto(db!, handle, IMAGE, service as "iMessage" | "SMS");
     console.log(`sent to ${f.name} (picture via ${used})`);
   } catch (err) {
