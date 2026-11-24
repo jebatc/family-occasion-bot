@@ -6,6 +6,7 @@ import { openDb, lastMessageTs } from "./db.ts";
 import { ovensText, sendReminders, statusText, tom, snapshotData } from "./agent.ts";
 import { triage } from "./triage.ts";
 import { acquireLock } from "./lock.ts";
+import { notesText } from "./notes.ts";
 import { useTransport, sharesHostNumber } from "./transport.ts";
 import { whatsapp } from "./whatsapp.ts";
 import { imessage, checkMessages } from "./imessage.ts";
@@ -17,6 +18,8 @@ const config = loadConfig();
 const db = openDb(join(config.eventDir, "state.db"));
 // what the dashboard shows; rewritten while the bot runs
 const SNAPSHOT = join(DATA_DIR, "dashboard.json");
+const NOTES = join(config.eventDir, "notes-for-next-year.md");
+const writeNotes = (path = NOTES) => writeFileSync(path, notesText(loadConfig(), db));
 const writeSnapshot = (path = SNAPSHOT) => writeFileSync(path, JSON.stringify(snapshotData({ config: loadConfig(), db, client: null as never }), null, 1));
 
 switch (cmd) {
@@ -48,6 +51,11 @@ switch (cmd) {
   case "snapshot":
     writeSnapshot(args[0]);
     console.log(`Wrote ${args[0] ?? SNAPSHOT}`);
+    break;
+
+  case "notes":
+    writeNotes(args[0]);
+    console.log(`Wrote ${args[0] ?? NOTES}`);
     break;
 
   case "check":
@@ -88,7 +96,8 @@ switch (cmd) {
         .catch((err) => console.error("inbound failed", err));
     }, lastMessageTs(db) ?? Date.now()); // catch up on anything newer than the last message the bot handled
     writeSnapshot();
-    setInterval(() => { try { writeSnapshot(); } catch (err) { console.error("snapshot failed", (err as Error).message); } }, 5 * 60_000);
+    writeNotes();
+    setInterval(() => { try { writeSnapshot(); writeNotes(); } catch (err) { console.error("snapshot failed", (err as Error).message); } }, 5 * 60_000);
     // daily nudges for missing RSVPs and unconfirmed dishes; checked every 30 minutes, queued with incoming messages
     setInterval(() => {
       queue = queue
@@ -102,6 +111,7 @@ switch (cmd) {
     console.log(`Usage: npm run hc -- <command>
   serve                       start answering texts (TRANSPORT=messages, the default, or whatsapp)
   check                       check the Mac can read and send Messages
+  notes [file]                write notes for next year's plan (tasks, supplies, shopping, who was asked; serve keeps them current)
   snapshot [file]             write what the dashboard shows (private/dashboard.json; serve does this every 5 minutes)
   status                      who's coming, who's bringing what, open questions
   ovens                       which dishes go in which oven, in time order
