@@ -65,7 +65,7 @@ private/                              ← never committed to this repo; keep it 
 
 Pick the occasion with `HOLIDAY` and `YEAR` in `.env` (for example `HOLIDAY=thanksgiving`, `YEAR=2026`). A new occasion is a new folder.
 
-**`family.yaml`** lists the host and everyone else, each with a phone number, a `household` (people who RSVP and are counted together) and optional `dietary` needs (e.g. `gluten-free`). Leave out the phone for children.
+**`family.yaml`** lists the host and everyone else, each with a phone number, a `household` (people who RSVP and are counted together) and optional `dietary` needs (e.g. `gluten-free`). Leave out the phone for children. Optional `nicknames: [my dad, dad]` are names the host can use in texts like `errand my dad: …`.
 
 **`event.yaml`** holds:
 - `planning`: what guests need up front (`arrival`, `address`, …). The invitation uses the date, the address and `arrival`.

@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { type Config, type Dish, type Person, phoneKey, saveDish, removeDish, findDish, findPerson, titleCase } from "./config.ts";
+import { type Config, type Dish, type Person, namesOf, phoneKey, saveDish, removeDish, findDish, findPerson, titleCase } from "./config.ts";
 import { type Db, logMessage, logChange } from "./db.ts";
 import { LIMITS, WRITE_TOOLS, clip, leaksPhone } from "./guard.ts";
 import { sendText, postToGroup, hasGroup, pause, sharesHostNumber } from "./transport.ts";
@@ -166,7 +166,7 @@ const detailed = (d: Dish) => label(d) + (d.description ? `: ${d.description}` :
 
 const ownerNames = (d: Dish) => [d.owner ?? []].flat().map((o) => String(o).trim()).filter(Boolean);
 const owns = (d: Dish, p: Person) =>
-  ownerNames(d).some((o) => [p.name, p.name.split(" ")[0]].some((n) => n.toLowerCase() === o.toLowerCase()));
+  ownerNames(d).some((o) => namesOf(p).some((n) => n.toLowerCase() === o.toLowerCase()));
 
 /** Tasks marked confirm_on_rsvp follow the household's RSVP: yes confirms them, no tells the host they need someone. */
 async function settleRsvpTasks({ config, db }: Ctx, guest: Person, rsvp: string) {
@@ -452,7 +452,7 @@ async function handleHost(ctx: Ctx, text: string) {
   const reqFor = text.trim().match(/^request\s+(.+)$/i);
   if (reqFor) {
     const who = reqFor[1].trim().toLowerCase();
-    const p = config.people.find((p) => [p.name, p.name.split(" ")[0]].some((n) => n.toLowerCase() === who));
+    const p = config.people.find((p) => namesOf(p).some((n) => n.toLowerCase() === who));
     if (!p) return tellHost(db, host, `I don't have anyone called "${reqFor[1].trim()}".`);
     return sendAll(ctx, requestMessages(ctx, p.household, `You texted "request ${reqFor[1].trim()}"`), `${p.household}: `);
   }
@@ -461,7 +461,7 @@ async function handleHost(ctx: Ctx, text: string) {
   const errand = text.trim().match(/^errand\s+([^:]+):\s*([\s\S]+?)\s+by\s+([^.]+?)\.?$/i);
   if (errand) {
     const who = errand[1].trim().toLowerCase();
-    const matches = config.people.filter((p) => p.phone && [p.name, p.name.split(" ")[0]].some((n) => n.toLowerCase() === who));
+    const matches = config.people.filter((p) => p.phone && namesOf(p).some((n) => n.toLowerCase() === who));
     if (matches.length !== 1) return tellHost(db, host, matches.length ? `More than one "${errand[1].trim()}"; use their full name.` : `I don't have anyone called "${errand[1].trim()}" with a phone number. Add them to family.yaml first.`);
     const [task, by, p] = [errand[2].trim(), errand[3].trim(), matches[0]];
     const task1 = task[0].toUpperCase() + task.slice(1);
@@ -475,7 +475,7 @@ async function handleHost(ctx: Ctx, text: string) {
   const tell = text.trim().match(/^tell\s+([^:]+):\s*([\s\S]+)$/i);
   if (tell) {
     const who = tell[1].trim().toLowerCase();
-    const matches = config.people.filter((p) => p.phone && [p.name, p.name.split(" ")[0]].some((n) => n.toLowerCase() === who));
+    const matches = config.people.filter((p) => p.phone && namesOf(p).some((n) => n.toLowerCase() === who));
     if (matches.length !== 1) return tellHost(db, host, matches.length ? `More than one "${tell[1].trim()}"; use their full name.` : `I don't have anyone called "${tell[1].trim()}" with a phone number.`);
     await sendText(db, matches[0].phone, signed(config, tell[2].trim()), "Your own words, sent with tell");
     return tellHost(db, host, `Sent to ${matches[0].name}.`);

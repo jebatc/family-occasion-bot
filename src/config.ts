@@ -6,7 +6,9 @@ export const DATA_DIR = resolve(process.env.HOLIDAY_DATA_DIR ?? "private");
 const envFile = join(DATA_DIR, ".env");
 if (existsSync(envFile)) process.loadEnvFile(envFile);
 
-export type Person = { name: string; phone: string; household: string; dietary?: string; notes?: string };
+export type Person = { name: string; phone: string; household: string; dietary?: string; notes?: string; nicknames?: string[] };
+/** Every name a person answers to: full name, first name, and any nicknames from family.yaml. */
+export const namesOf = (p: Person) => [p.name, p.name.split(" ")[0], ...(p.nicknames ?? [])];
 /** One menu entry in event.yaml. plan = needed up front; shopping, prep_ahead and day_of = needed when executing. */
 export type Dish = {
   dish: string; // short name, e.g. "Brussels sprout salad"
@@ -106,7 +108,7 @@ export function removeDish(eventFile: string, name: string) {
 export function findPerson(config: Config, name: string, needPhone = false): Person | undefined {
   const q = name.trim().toLowerCase();
   return [config.host, ...config.people].find((p) =>
-    (!needPhone || p.phone) && [p.name, p.name.split(" ")[0]].some((n) => n.toLowerCase() === q));
+    (!needPhone || p.phone) && namesOf(p).some((n) => n.toLowerCase() === q));
 }
 
 export const findDish = (config: Config, name: string) => config.menu.find((d) => sameDish(d.dish, name));

@@ -821,3 +821,10 @@ test("the host adds an errand by text, and Tom starts following up", async () =>
   await handleInbound({ config, db, client: null as any }, { waId: "w2", from: HOST, text: "errand Dana: anything by Monday" });
   assert.match(outbound(HOST).at(-1)!, /I don't have anyone called "Dana"/);
 });
+
+test("a nickname from family.yaml finds the person", async () => {
+  writeFileSync(join(dir, "family.yaml"), readFileSync(join(dir, "family.yaml"), "utf8") + `  - name: Nim Batchelor\n    phone: "15550000051"\n    nicknames: [my dad]\n`);
+  reload();
+  await handleInbound({ config, db, client: null as any }, { waId: "w1", from: HOST, text: "errand my dad: bring the cooler by Wednesday" });
+  assert.match(outbound(HOST).at(-1)!, /^Added: Bring the cooler, for Nim Batchelor/);
+});
