@@ -3,13 +3,15 @@
 // Usage: node scripts/send-greeting.ts [--dry-run] [--now]
 //   --dry-run  print who would get what, send nothing
 //   --now      skip the "is it Thanksgiving?" date check (for testing)
-import { existsSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { CHAT_DB, imessage, openChatDb, sendPhoto, serviceFor } from "../src/imessage.ts";
 
 const ROOT = join(import.meta.dirname, "..");
-const IMAGE = join(ROOT, "private", "greeting-card.jpg");
+const SOURCE = join(ROOT, "private", "greeting-card.jpg");
+const IMAGE = join(homedir(), "Pictures", "tom", "greeting-card.jpg"); // Messages only attaches files from here (not the project folder)
 const TEXT = "Happy Thanksgiving!\n\n-Tom the Turkey 🦃 (Jenn's Thanksgiving Agent)";
 const THANKSGIVING = "2026-11-26"; // fourth Thursday of November 2026
 
@@ -21,7 +23,9 @@ if (!args.has("--now") && today !== THANKSGIVING) {
 }
 
 const friends: { name: string; phone: string }[] = parse(readFileSync(join(ROOT, "private", "friends.yaml"), "utf8")).friends;
-if (!existsSync(IMAGE)) throw new Error(`Missing card image: ${IMAGE}`);
+if (!existsSync(SOURCE)) throw new Error(`Missing card image: ${SOURCE}`);
+mkdirSync(join(IMAGE, ".."), { recursive: true });
+copyFileSync(SOURCE, IMAGE);
 
 const dry = args.has("--dry-run");
 const db = dry ? undefined : openChatDb(CHAT_DB);

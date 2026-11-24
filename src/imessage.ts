@@ -149,7 +149,7 @@ on run argv
     else
       set acct to 1st account whose service type = iMessage
     end if
-    send (POSIX file thePath) to participant theHandle of acct
+    send ((POSIX file thePath) as alias) to participant theHandle of acct
   end tell
 end run`;
 
