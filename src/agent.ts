@@ -417,6 +417,8 @@ async function handleHost(ctx: Ctx, text: string) {
     const esc = db.prepare("SELECT * FROM escalations WHERE id = ?").get(Number(m[1]));
     if (!esc) return tellHost(db, host, `There's no question #${m[1]}.`);
     const reply = m[2].trim();
+    // never relay one of Tom's own notices to a guest (a notice read back as a command carries "Reply "#6 ok"")
+    if (/Reply "#\d+/.test(reply)) return tellHost(db, host, `I didn't send that to ${config.people.find((p) => p.phone === esc.phone)?.name ?? "them"}: it looks like one of my own notices, not your answer.`);
     const ok = /^(ok|yes|send)$/i.test(reply);
     const no = esc.dish && /^no\b/i.test(reply); // only dish proposals have a "no"
     const answer = ok ? (esc.suggested as string | null) : no ? reply.slice(2).trim() || `${config.host.name} says let's skip that one this year. Thanks so much for offering!` : reply;

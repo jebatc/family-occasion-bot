@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import { DATA_DIR, findPerson, loadConfig, phoneKey } from "./config.ts";
@@ -19,7 +19,14 @@ const db = openDb(join(config.eventDir, "state.db"));
 // what the dashboard shows; rewritten while the bot runs
 const SNAPSHOT = join(DATA_DIR, "dashboard.json");
 const NOTES = join(config.eventDir, "notes-for-next-year.md");
-const writeNotes = (path = NOTES) => writeFileSync(path, notesText(loadConfig(), db));
+const writeNotes = (path = NOTES) => {
+  writeFileSync(path, notesText(loadConfig(), db));
+  // One-way copy of the plan files into a Google Drive folder (for Claude Duet etc.); never family.yaml, state.db or .env
+  const share = process.env.DRIVE_SHARE_DIR;
+  if (share && path === NOTES)
+    for (const f of ["event.yaml", "plan.md", "schedule.md", "checklist.md", "notes-for-next-year.md"])
+      if (existsSync(join(config.eventDir, f))) copyFileSync(join(config.eventDir, f), join(share, f));
+};
 const writeSnapshot = (path = SNAPSHOT) => writeFileSync(path, JSON.stringify(snapshotData({ config: loadConfig(), db, client: null as never }), null, 1));
 
 switch (cmd) {

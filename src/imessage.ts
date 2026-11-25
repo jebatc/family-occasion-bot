@@ -65,7 +65,10 @@ const ONE_TO_ONE = `
   FROM message m JOIN handle h ON h.ROWID = m.handle_id
   WHERE m.item_type = 0 AND m.associated_message_type = 0
     AND NOT EXISTS (SELECT 1 FROM chat_message_join cmj JOIN chat c ON c.ROWID = cmj.chat_id
-                    WHERE cmj.message_id = m.ROWID AND c.style = 43)`;
+                    WHERE cmj.message_id = m.ROWID AND c.style = 43)
+    -- Messages sometimes re-inserts old texts under new ids with their original date: those replays aren't new messages
+    AND NOT EXISTS (SELECT 1 FROM message m2 WHERE m2.handle_id = m.handle_id AND m2.is_from_me = m.is_from_me
+                    AND m2.date = m.date AND m2.text IS m.text AND m2.ROWID < m.ROWID)`;
 
 export function openChatDb(path = CHAT_DB) {
   if (!existsSync(path)) throw new Error(`Can't find ${path}. Is Messages set up on this Mac?`);

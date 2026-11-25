@@ -53,6 +53,15 @@ test("Apple dates are read as JS times", () => {
   assert.equal(rowToInbound(newMessages(chat, 0)[0])?.ts, at);
 });
 
+test("a replayed old text (new id, same date) is not a new message", () => {
+  const at = Date.now() - 3 * 86400_000;
+  addMessage({ handle: 1, text: "#6 Emma Dove wants to bring Carrot Cake", at });
+  addMessage({ handle: 1, text: "newer, different", at: at + 1000 });
+  addMessage({ handle: 1, text: "#6 Emma Dove wants to bring Carrot Cake", at }); // the replay
+  assert.deepEqual(newMessages(chat, 0).map((r) => r.text), ["#6 Emma Dove wants to bring Carrot Cake", "newer, different"]);
+  assert.deepEqual(newMessages(chat, 1).map((r) => r.text), ["newer, different"]);
+});
+
 test("text is read from attributedBody when message.text is empty", () => {
   assert.equal(textFromAttributedBody(attributedBody("YES! We'll bring pie 🥧")), "YES! We'll bring pie 🥧");
   const long = "a".repeat(300);
