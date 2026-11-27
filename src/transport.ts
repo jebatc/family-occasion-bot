@@ -62,6 +62,14 @@ export const recentTexts = (db: Db, to: string, ms: number) => (recent.get(db)?.
 let hostPhone: string | undefined;
 export const setHostPhone = (phone?: string) => void (hostPhone = phone);
 
+/**
+ * A last look at a guest's text before it goes out, given the whole conversation. Returns nothing to send it,
+ * or true when it took the text over (held it and asked the host). Texts the host wrote themselves skip it.
+ */
+export type Reviewer = (to: string, body: string, why?: string) => Promise<boolean | void>;
+let reviewer: Reviewer | undefined;
+export const setReviewer = (r?: Reviewer) => void (reviewer = r);
+
 /** True when a guest was just sent this text: the same words within 12 hours, or mostly the same words within 30 minutes. */
 function repeatsRecent(db: Db, to: string, body: string) {
   if (!hostPhone || to === hostPhone) return false;
@@ -80,6 +88,7 @@ export async function sendText(db: Db, to: string, body: string, why?: string) {
     console.log(`[held] repeat of a recent text to ${to}: ${why ?? ""}`);
     return false;
   }
+  if (reviewer && hostPhone && to !== hostPhone && !why?.startsWith("Your ") && (await reviewer(to, body, why))) return false;
   await pace(to);
   await deliver(to, body, (t) => t.send(to, body));
   logMessage(db, to, "out", body, undefined, textHash(body), why);

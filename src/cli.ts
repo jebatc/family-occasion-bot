@@ -3,11 +3,11 @@ import { join } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import { DATA_DIR, findPerson, loadConfig, phoneKey } from "./config.ts";
 import { openDb, lastMessageTs } from "./db.ts";
-import { ovensText, sendReminders, statusText, tom, snapshotData } from "./agent.ts";
+import { ovensText, sendReminders, statusText, tom, snapshotData, messageReviewer } from "./agent.ts";
 import { triage } from "./triage.ts";
 import { acquireLock } from "./lock.ts";
 import { notesText } from "./notes.ts";
-import { useTransport, sharesHostNumber, setHostPhone } from "./transport.ts";
+import { useTransport, sharesHostNumber, setHostPhone, setReviewer } from "./transport.ts";
 import { whatsapp } from "./whatsapp.ts";
 import { imessage, checkMessages } from "./imessage.ts";
 
@@ -88,6 +88,7 @@ switch (cmd) {
     useTransport(transport);
     setHostPhone(config.host.phone);
     const ctx = { config, db, client: claude() };
+    setReviewer(messageReviewer(ctx));
     // every text goes through triage, which refers to Tom only what's his to handle
     const onText = triage({ project: tom(ctx), client: ctx.client, shared: sharesHostNumber() });
     let queue = Promise.resolve(); // one message at a time keeps per-guest history consistent

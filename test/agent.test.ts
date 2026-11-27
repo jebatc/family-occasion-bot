@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, saveDish, titleCase, type Config } from "../src/config.ts";
 import { openDb, logMessage, type Db } from "../src/db.ts";
-import { tom, statusText, dietaryConflicts, ovensText, reminderMessages, snapshotData, type Ctx } from "../src/agent.ts";
+import { tom, messageReviewer, statusText, dietaryConflicts, ovensText, reminderMessages, snapshotData, type Ctx } from "../src/agent.ts";
 import { triage, newTriageState, type TriageState } from "../src/triage.ts";
 import { toInbound, worthCatchingUp } from "../src/whatsapp.ts";
-import { useTransport, dryRunSent, textHash, sharesHostNumber, sendText, setHostPhone, type Inbound } from "../src/transport.ts";
+import { useTransport, dryRunSent, textHash, sharesHostNumber, sendText, setHostPhone, setReviewer, type Inbound } from "../src/transport.ts";
 import { LIMITS, leaksPhone } from "../src/guard.ts";
 
 process.env.DRY_RUN = "1";
@@ -878,4 +878,30 @@ test("a plain yes that changes nothing and gets no reply is flagged to the host"
   const { client } = fakeClient([done]);
   await handleInbound({ config, db, client }, { waId: "w1", from: SUE, text: "YES" });
   assert.match(outbound(HOST).at(-1)!, /Aunt Sue texted "YES" and I recorded nothing and sent no reply/);
+});
+
+test("a text is checked against the conversation first; anything short of sure is held for the host", async () => {
+  const reply = (text: string) => ({ messages: { create: async () => ({ content: [{ type: "text", text }] }) } }) as any;
+  const review = (client: any) => (setReviewer(messageReviewer({ config, db, client })), setHostPhone(HOST));
+  try {
+    review(reply('{"verdict":"send","reason":""}'));
+    assert.equal(await sendText(db, SUE, "Welcome! Arrive between 10 and 11 on Thursday.", "Reply"), true);
+
+    review(reply('{"verdict":"escalate","reason":"She already said yes to this."}'));
+    assert.equal(await sendText(db, SUE, "Could you please bring the Green Bean Casserole?", "Daily nudge"), false);
+    assert.match(outbound(HOST).at(-1)!, /^#1 I held a text to Aunt Sue: She already said yes to this\.\nCould you please bring the Green Bean Casserole\?\nReply "#1 ok"/);
+    assert.equal(outbound(SUE).length, 1, "nothing went out");
+    await handleInbound({ config, db, client: null as any }, { waId: "w1", from: HOST, text: "#1 ok" });
+    assert.equal(outbound(SUE).at(-1), "Could you please bring the Green Bean Casserole? — Tom 🦃", "the host's OK sends it without another review");
+
+    review(reply("not json"));
+    assert.equal(await sendText(db, SUE, "Another text", "Daily nudge"), false, "a review that fails counts as unsure");
+    assert.match(outbound(HOST).at(-1)!, /^#2 I held a text to Aunt Sue: I couldn't check it/);
+    await handleInbound({ config, db, client: null as any }, { waId: "w2", from: HOST, text: "#2 skip" });
+    assert.match(outbound(HOST).at(-1)!, /Dropped #2; nothing was sent/);
+    assert.equal(outbound(SUE).length, 2);
+  } finally {
+    setReviewer(undefined);
+    setHostPhone(undefined);
+  }
 });
