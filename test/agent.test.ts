@@ -1,4 +1,4 @@
-import { test, beforeEach } from "node:test";
+import { test, beforeEach, afterEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import { cpSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,7 +25,9 @@ const reload = () => (config = loadConfig(dir, "thanksgiving", "2026"));
 let triageState: TriageState;
 const handleInbound = (ctx: Ctx, msg: Inbound) =>
   triage({ project: tom(ctx), client: ctx.client, shared: sharesHostNumber(), state: triageState })(msg);
+// The example event is Thanksgiving 2026 and reminders stop after it, so pin "now" to a week before
 beforeEach(() => {
+  mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-19T09:00:00") });
   triageState = newTriageState();
   dryRunSent.length = 0;
   db = openDb(":memory:");
@@ -33,6 +35,7 @@ beforeEach(() => {
   cpSync("examples/data", dir, { recursive: true });
   reload();
 });
+afterEach(() => mock.timers.reset());
 const eventYaml = () => readFileSync(config.eventFile, "utf8");
 const findDishByName = (name: string) => config.menu.find((d) => d.dish === name);
 // request only covers households that RSVP'd yes
