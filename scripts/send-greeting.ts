@@ -3,7 +3,7 @@
 // Usage: node scripts/send-greeting.ts [--dry-run] [--now]
 //   --dry-run  print who would get what, send nothing
 //   --now      skip the "is it Thanksgiving?" date check (for testing)
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
@@ -13,6 +13,9 @@ const ROOT = join(import.meta.dirname, "..");
 const SOURCE = join(ROOT, "private", "greeting-card-captioned.jpg"); // made by scripts/caption-card.py: the greeting is written on the card
 const IMAGE = join(homedir(), "Pictures", "tom", "greeting-card.jpg"); // Messages only attaches files from here (not the project folder)
 const THANKSGIVING = "2026-11-26"; // fourth Thursday of November 2026
+
+const SENT = join(ROOT, "private", `greeting-sent-${THANKSGIVING}.txt`); // one handle per line; a rerun skips these
+const alreadySent = new Set(existsSync(SENT) ? readFileSync(SENT, "utf8").split("\n").filter(Boolean) : []);
 
 const args = new Set(process.argv.slice(2));
 const today = new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD in local time
@@ -32,6 +35,10 @@ const handleFor = (phone: string) => `+${phone.replace(/\D/g, "")}`;
 
 for (const f of friends) {
   const handle = handleFor(f.phone);
+  if (alreadySent.has(handle)) {
+    console.log(`skipped ${f.name} (already sent)`);
+    continue;
+  }
   const service = db ? serviceFor(db, handle) : "auto";
   if (dry) {
     console.log(`would send to ${f.name} (${handle}, ${service}): the card`);
@@ -39,6 +46,7 @@ for (const f of friends) {
   }
   try {
     const used = await sendPhoto(db!, handle, IMAGE, service as "iMessage" | "SMS");
+    appendFileSync(SENT, handle + "\n"); // record right away so a crash or rerun can't double-send
     console.log(`sent to ${f.name} (picture via ${used})`);
   } catch (err) {
     console.error(`failed for ${f.name}:`, (err as Error).message);
