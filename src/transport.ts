@@ -52,10 +52,40 @@ async function pace(to: string) {
   lastSent.set(to, Date.now());
 }
 
+// Remembered in memory only (not the database), per database so tests stay apart: what each person was just sent
+const recent = new WeakMap<Db, Map<string, { body: string; ts: number }[]>>();
+const wordsOf = (t: string) => new Set(t.toLowerCase().match(/[a-z]{4,}/g) ?? []);
+/** Texts sent to one person in the last `ms` milliseconds (since the bot started). */
+export const recentTexts = (db: Db, to: string, ms: number) => (recent.get(db)?.get(to) ?? []).filter((m) => m.ts > Date.now() - ms).map((m) => m.body);
+
+// The host's own number is exempt from the repeat check: status notices and command lists legitimately repeat
+let hostPhone: string | undefined;
+export const setHostPhone = (phone?: string) => void (hostPhone = phone);
+
+/** True when a guest was just sent this text: the same words within 12 hours, or mostly the same words within 30 minutes. */
+function repeatsRecent(db: Db, to: string, body: string) {
+  if (!hostPhone || to === hostPhone) return false;
+  if (db.prepare("SELECT 1 FROM messages WHERE phone = ? AND direction = 'out' AND hash = ? AND ts > ?").get(to, textHash(body), Date.now() - 12 * 3600_000)) return true;
+  const mine = wordsOf(body);
+  return recentTexts(db, to, 30 * 60_000).some((t) => {
+    const theirs = wordsOf(t);
+    const shared = [...mine].filter((w) => theirs.has(w)).length;
+    return mine.size >= 6 && theirs.size >= 6 && (2 * shared) / (mine.size + theirs.size) >= 0.5; // shortcut: word overlap, not meaning; upgrade if real replies get held
+  });
+}
+
+/** Sends a text and logs it. Returns false, sending nothing, when the guest was just sent the same thing. */
 export async function sendText(db: Db, to: string, body: string, why?: string) {
+  if (repeatsRecent(db, to, body)) {
+    console.log(`[held] repeat of a recent text to ${to}: ${why ?? ""}`);
+    return false;
+  }
   await pace(to);
   await deliver(to, body, (t) => t.send(to, body));
   logMessage(db, to, "out", body, undefined, textHash(body), why);
+  if (!recent.has(db)) recent.set(db, new Map());
+  recent.get(db)!.set(to, [...(recent.get(db)!.get(to) ?? []).slice(-4), { body, ts: Date.now() }]);
+  return true;
 }
 
 /** Sends a text without logging it anywhere: triage's notices and replies. */

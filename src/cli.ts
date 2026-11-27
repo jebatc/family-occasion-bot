@@ -7,7 +7,7 @@ import { ovensText, sendReminders, statusText, tom, snapshotData } from "./agent
 import { triage } from "./triage.ts";
 import { acquireLock } from "./lock.ts";
 import { notesText } from "./notes.ts";
-import { useTransport, sharesHostNumber } from "./transport.ts";
+import { useTransport, sharesHostNumber, setHostPhone } from "./transport.ts";
 import { whatsapp } from "./whatsapp.ts";
 import { imessage, checkMessages } from "./imessage.ts";
 
@@ -86,6 +86,7 @@ switch (cmd) {
       : imessage(asMe ? { host: config.host.phone, selfHandles } : {});
     if (asMe && kind !== "whatsapp") console.log(`Texting as you. Send commands by texting yourself (+${config.host.phone}).`);
     useTransport(transport);
+    setHostPhone(config.host.phone);
     const ctx = { config, db, client: claude() };
     // every text goes through triage, which refers to Tom only what's his to handle
     const onText = triage({ project: tom(ctx), client: ctx.client, shared: sharesHostNumber() });

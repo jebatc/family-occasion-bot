@@ -8,7 +8,7 @@ import { openDb, logMessage, type Db } from "../src/db.ts";
 import { tom, statusText, dietaryConflicts, ovensText, reminderMessages, snapshotData, type Ctx } from "../src/agent.ts";
 import { triage, newTriageState, type TriageState } from "../src/triage.ts";
 import { toInbound, worthCatchingUp } from "../src/whatsapp.ts";
-import { useTransport, dryRunSent, textHash, sharesHostNumber, type Inbound } from "../src/transport.ts";
+import { useTransport, dryRunSent, textHash, sharesHostNumber, sendText, setHostPhone, type Inbound } from "../src/transport.ts";
 import { LIMITS, leaksPhone } from "../src/guard.ts";
 
 process.env.DRY_RUN = "1";
@@ -835,4 +835,44 @@ test("a nickname from family.yaml finds the person", async () => {
   reload();
   await handleInbound({ config, db, client: null as any }, { waId: "w1", from: HOST, text: "errand my dad: bring the cooler by Wednesday" });
   assert.match(outbound(HOST).at(-1)!, /^Added: Bring the cooler, for Nim Batchelor/);
+});
+
+test("a question that was already answered is not relayed to the guest again", async () => {
+  db.prepare("INSERT INTO escalations (phone, question, suggested, ts) VALUES (?, 'q', 'draft', 0)").run(SUE);
+  const ctx: Ctx = { config, db, client: null as any };
+  await handleInbound(ctx, { waId: "w1", from: HOST, text: "#1 Horizontal" });
+  await handleInbound(ctx, { waId: "w2", from: HOST, text: "#1 Horizontal" }); // a replay or a retype
+  assert.equal(outbound(SUE).length, 1);
+  assert.match(outbound(HOST).at(-1)!, /#1 was already answered, so I didn't send that again/);
+});
+
+test("a short answer from the host is sent as a full reply to the question", async () => {
+  db.prepare("INSERT INTO escalations (phone, question, suggested, ts) VALUES (?, 'Which way to cut the sprouts?', 'draft', 0)").run(SUE);
+  const client = { messages: { create: async () => ({ content: [{ type: "text", text: "Cut the sprouts horizontally." }] }) } } as any;
+  await tom({ config, db, client }).handle({ waId: "w1", from: HOST, text: "#1 Horizontal", fromHost: true });
+  assert.equal(outbound(SUE)[0], "Cut the sprouts horizontally. — Tom 🦃");
+  db.prepare("INSERT INTO escalations (phone, question, suggested, ts) VALUES (?, 'q2', 'draft', 0)").run(BOB);
+  await tom({ config, db, client: { messages: { create: async () => { throw new Error("down"); } } } as any }).handle({ waId: "w3", from: HOST, text: "#2 Horizontal", fromHost: true });
+  assert.equal(outbound(BOB)[0], "Horizontal — Tom 🦃", "the host's own words go out if rewording fails");
+});
+
+test("a guest is not sent the same text twice, or two texts saying nearly the same thing", async () => {
+  setHostPhone(HOST);
+  try {
+    assert.equal(await sendText(db, SUE, "Could you please bring the Brussels Sprout Salad and the Corn Pudding?"), true);
+    assert.equal(await sendText(db, SUE, "Could you please bring the Brussels Sprout Salad and the Corn Pudding?"), false, "identical");
+    assert.equal(await sendText(db, SUE, "Hi Sue! Could you also bring the Brussels Sprout Salad, plus the Corn Pudding please?"), false, "same ask, other words");
+    assert.equal(await sendText(db, SUE, "Arrive between 10:00 and 11:00 AM on Thursday; dinner is at 2:10 PM."), true, "a different text goes out");
+    assert.equal(await sendText(db, HOST, "Commands: status"), true);
+    assert.equal(await sendText(db, HOST, "Commands: status"), true, "the host's notices may repeat");
+    assert.equal(outbound(SUE).length, 2);
+  } finally {
+    setHostPhone(undefined);
+  }
+});
+
+test("a plain yes that changes nothing and gets no reply is flagged to the host", async () => {
+  const { client } = fakeClient([done]);
+  await handleInbound({ config, db, client }, { waId: "w1", from: SUE, text: "YES" });
+  assert.match(outbound(HOST).at(-1)!, /Aunt Sue texted "YES" and I recorded nothing and sent no reply/);
 });

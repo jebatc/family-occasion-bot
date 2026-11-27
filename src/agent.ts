@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { type Config, type Dish, type Person, namesOf, phoneKey, saveDish, removeDish, findDish, findPerson, titleCase } from "./config.ts";
 import { type Db, logMessage, logChange } from "./db.ts";
 import { LIMITS, WRITE_TOOLS, clip, leaksPhone } from "./guard.ts";
-import { sendText, postToGroup, hasGroup, pause, sharesHostNumber } from "./transport.ts";
+import { sendText, postToGroup, hasGroup, pause, sharesHostNumber, recentTexts } from "./transport.ts";
 import type { Project, Referral } from "./triage.ts";
 
 const MODEL = "claude-opus-5-5";
@@ -409,6 +409,24 @@ async function runGuestAgent(ctx: Ctx, guest: Person, text: string, waId: string
   return saidYes;
 }
 
+/** A bare answer like "Horizontal" is turned into a full friendly reply to the guest's question; anything longer goes as the host wrote it. */
+async function phraseAnswer({ client }: Ctx, question: string, answer: string) {
+  if (!client || answer.split(/\s+/).length > 6) return answer;
+  try {
+    const res = await client.messages.create({
+      model: MODEL,
+      max_tokens: 300,
+      system: "You turn a host's short answer into one friendly reply to the guest who asked. Restate what the answer settles so it reads on its own, add no facts and no sign-off, and keep it to one or two sentences. Reply with the message only.",
+      messages: [{ role: "user", content: `The guest's question: ${question}\nThe host's answer: ${answer}` }],
+    });
+    const out = res.content.find((b) => b.type === "text");
+    const text = out?.type === "text" ? out.text.trim() : "";
+    return text && text.length <= 500 && !text.startsWith("{") ? text : answer;
+  } catch {
+    return answer; // the host's own words are always good enough to send
+  }
+}
+
 async function handleHost(ctx: Ctx, text: string) {
   const { config, db } = ctx;
   const host = config.host.phone;
@@ -416,6 +434,11 @@ async function handleHost(ctx: Ctx, text: string) {
   if (m) {
     const esc = db.prepare("SELECT * FROM escalations WHERE id = ?").get(Number(m[1]));
     if (!esc) return tellHost(db, host, `There's no question #${m[1]}.`);
+    // a re-read or retyped answer must not reach the guest twice
+    if (esc.status === "done") {
+      const to = config.people.find((p) => p.phone === esc.phone);
+      return tellHost(db, host, `#${esc.id} was already answered, so I didn't send that again.${to ? ` To text ${to.name.split(" ")[0]} something new, use "tell ${to.name.split(" ")[0]}: <message>".` : ""}`);
+    }
     const reply = m[2].trim();
     // never relay one of Tom's own notices to a guest (a notice read back as a command carries "Reply "#6 ok"")
     if (/Reply "#\d+/.test(reply)) return tellHost(db, host, `I didn't send that to ${config.people.find((p) => p.phone === esc.phone)?.name ?? "them"}: it looks like one of my own notices, not your answer.`);
@@ -429,7 +452,9 @@ async function handleHost(ctx: Ctx, text: string) {
     const needs = [...new Set(conflicts.map((c) => c.need))];
     const who = [...new Set(conflicts.map((c) => c.person.split(" ")[0]))];
     const question = needs.length ? `\n\nOne quick question: is it ${needs.join(" and ")}? ${who.join(" and ")} ${who.length === 1 ? "needs" : "need"} that.` : "";
-    await sendText(db, esc.phone as string, signed(config, answer + question), `Your answer to question #${esc.id}${ok ? " (the suggested reply you approved)" : ""}`);
+    const wording = ok || no ? answer : await phraseAnswer(ctx, String(esc.question), answer);
+    if (!(await sendText(db, esc.phone as string, signed(config, wording + question), `Your answer to question #${esc.id}${ok ? " (the suggested reply you approved)" : ""}`)))
+      return tellHost(db, host, `I didn't send #${esc.id}: ${guest?.name ?? "they"} was just sent the same text.`);
     // a dish proposal stays open until it's settled with ok or no
     if (!esc.dish || ok || no) db.prepare("UPDATE escalations SET answer = ?, status = 'done' WHERE id = ?").run(answer, esc.id);
     if (esc.dish && ok) saveDish(config.eventFile, esc.dish as string, { status: "confirmed" });
@@ -539,7 +564,7 @@ const awaitingHost = (db: Db) => new Set(db.prepare("SELECT dish FROM escalation
 
 /** One message per person listing every proposed dish they own; each is marked requested once it's sent. */
 /** Dish asks for households that have RSVP'd yes (the host's always counts), optionally just one household. */
-function requestMessages({ config, db }: Ctx, household?: string, why = "Their household said yes, so Tom asks for their dishes"): Outgoing[] {
+function requestMessages({ config, db }: Ctx, household?: string, why = "Their household said yes, so Tom asks for their dishes", skipRecent = false): Outgoing[] {
   const { event, persona, host } = config;
   const pending = awaitingHost(db);
   const homes = households(config);
@@ -547,7 +572,9 @@ function requestMessages({ config, db }: Ctx, household?: string, why = "Their h
     if (household && p.household !== household) return [];
     if (p.household !== host.household && householdRsvp(db, homes.get(p.household)!)?.status !== "yes") return [];
     // no phone (children): the host handles it
-    const dishes = config.menu.filter((d) => owns(d, p) && d.status === "proposed" && !d.confirm_on_rsvp && !pending.has(d.dish.toLowerCase()));
+    // a dish Tom just brought up in conversation isn't asked again by the automatic ask
+    const justSaid = skipRecent && p.phone ? recentTexts(db, p.phone, 30 * 60_000).join(" ").toLowerCase() : "";
+    const dishes = config.menu.filter((d) => owns(d, p) && d.status === "proposed" && !d.confirm_on_rsvp && !pending.has(d.dish.toLowerCase()) && !(justSaid && justSaid.includes(d.dish.toLowerCase())));
     if (!p.phone || !dishes.length) return [];
     const bring = dishes.filter((d) => d.course !== "task");
     const help = dishes.filter((d) => d.course === "task");
@@ -661,7 +688,7 @@ async function followUpRequests(ctx: Ctx, guest: Person) {
     await pause(); // let the guest's own confirmation land first
     await sendText(db, p.phone, `Hi ${first(p)}! ${first(guest)} let me know ${adults.length === 2 ? "you're both" : "your household is"} coming to ${config.event.title.replace(/\s*\d{4}$/, "")}. See you there! ${config.persona.signoff ?? ""}`.trim(), `${guest.name} said yes for their household`);
   }
-  const outgoing = requestMessages(ctx, guest.household);
+  const outgoing = requestMessages(ctx, guest.household, undefined, true);
   if (!outgoing.length) return;
   await pause();
   return sendAll(ctx, outgoing, `${guest.household} said yes. `);
@@ -670,17 +697,19 @@ async function followUpRequests(ctx: Ctx, guest: Person) {
 async function sendAll({ config, db }: Ctx, outgoing: Outgoing[], prefix = "") {
   const sent: string[] = [];
   const failed: string[] = [];
+  const held: string[] = []; // just sent the same text
   for (const [i, o] of outgoing.entries()) {
     if (i) await pause();
     try {
-      await sendText(db, o.phone, o.text, o.why);
-      o.sent?.();
-      sent.push(o.name);
+      if (await sendText(db, o.phone, o.text, o.why)) {
+        o.sent?.();
+        sent.push(o.name);
+      } else held.push(o.name);
     } catch (err) {
       failed.push(`${o.name} (${(err as Error).message})`);
     }
   }
-  const summary = sent.length ? `Sent to ${sent.length}: ${sent.join(", ")}` : "Nobody left to send to.";
+  const summary = (sent.length ? `Sent to ${sent.length}: ${sent.join(", ")}` : "Nobody left to send to.") + (held.length ? `\nSkipped, they were just sent this: ${held.join(", ")}` : "");
   return tellHost(db, config.host.phone, prefix + (failed.length ? `${summary}\nFailed: ${failed.join(", ")}` : summary));
 }
 
@@ -763,6 +792,12 @@ export function tom(ctx: Ctx): Project {
   };
 }
 
+/** True when handling a guest's text sent them a reply, changed the plan, or asked the host something. */
+function handledSince(db: Db, phone: string, since: number) {
+  const q = (table: string, extra = "") => db.prepare(`SELECT 1 FROM ${table} WHERE phone = ? AND ts >= ? ${extra}`).get(phone, since);
+  return !!(q("messages", "AND direction = 'out'") || q("changes") || q("escalations"));
+}
+
 /** A text triage referred to Tom: a host command, or a guest's text about the gathering. */
 export async function handleReferral(ctx: Ctx, r: Referral) {
   const { config, db } = ctx;
@@ -773,7 +808,11 @@ export async function handleReferral(ctx: Ctx, r: Referral) {
   try {
     // event-driven: a yes gets the bot's confirmation reply first, then that household's dish requests
     const replying = { ...ctx, inReplyTo: r.text };
+    const started = Date.now();
     if (await runGuestAgent(replying, guest, r.text, r.waId)) await followUpRequests(ctx, guest);
+    // a plain "yes" that changed nothing and got no answer would otherwise vanish
+    if (/^\s*(yes|yep|yeah|yup|sure|ok|okay|sounds good|will do|👍)\W*$/i.test(r.text) && !handledSince(db, guest.phone, started))
+      await tellHost(db, config.host.phone, `⚠️ ${guest.name} texted "${r.text}" and I recorded nothing and sent no reply. Check "status", or answer them directly.`);
   } catch (err) {
     console.error(`agent failed for ${guest.name}`, err);
     await tellHost(db, config.host.phone, `⚠️ I hit an error answering ${guest.name}${sharesHostNumber() ? "" : `: "${r.text}"`}. Please reply to them directly.`);
