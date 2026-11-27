@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Db } from "./db.ts";
 import type { Dish, loadConfig } from "./config.ts";
 
@@ -11,6 +13,10 @@ export function notesText(config: ReturnType<typeof loadConfig>, db: Db) {
   const line = (d: Dish) => `- ${d.dish}${d.description ? ` (${d.description})` : ""}: ${owners(d).join(", ") || "no owner"}${d.done_by ? `, by ${d.done_by}` : ""} [${d.status ?? "proposed"}]`;
   const kind = (d: Dish) => String(d.course ?? "").toLowerCase();
   const out = [`# ${config.event.title}: notes for next year`, "", "_Rewritten every few minutes while the bot runs._", ""];
+
+  // Reminders typed by hand live beside persona.yaml, outside the year folder, so they survive into next year
+  const mine = config.eventDir && join(config.eventDir, "..", "next-year.md");
+  if (mine && existsSync(mine)) out.push("## Reminders for next year", readFileSync(mine, "utf8").trim(), "");
 
   out.push("## Tasks and errands", ...menu.filter((d) => kind(d) === "task" || d.done_by).map(line), "");
   out.push("## Supplies people were asked to bring", ...menu.filter((d) => kind(d) === "supplies").map(line), "");
